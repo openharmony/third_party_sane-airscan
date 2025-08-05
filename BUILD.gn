@@ -1,0 +1,113 @@
+#Copyright (c) 2025 Huawei Device Co., Ltd.
+#Licensed under the Apache License, Version 2.0 (the "License");
+#you may not use this file except in compliance with the License.
+#You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+#Unless required by applicable law or agreed to in writing, software
+#distributed under the License is distributed on an "AS IS" BASIS,
+#WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#See the License for the specific language governing permissions and
+#limitations under the License.
+
+import("//build/ohos.gni")
+
+source_dir = "//third_party/sane-airscan"
+target_dir = "${target_gen_dir}/patches"
+
+action("airscan_action") {
+  script = "//third_party/sane-airscan/patch_install.py"
+  inputs = [ "${source_dir}/patches/oh-transplant.patch" ]
+  outputs = [
+    "${target_dir}/patches/airscan-conf.c",
+    "${target_dir}/patches/airscan-devops.c",
+    "${target_dir}/patches/airscan-eloop.c",
+    "${target_dir}/patches/airscan-http.c",
+    "${target_dir}/patches/airscan-init.c",
+    "${target_dir}/patches/airscan-log.c",
+    "${target_dir}/patches/airscan-mdns.c",
+    "${target_dir}/patches/airscan-netif.c",
+    "${target_dir}/patches/airscan-pollable.c",
+    "${target_dir}/patches/airscan-tiff.c",
+    "${target_dir}/patches/airscan-wsd.c",
+    "${target_dir}/patches/airscan-zeroconf.c",
+    "${target_dir}/patches/airscan.c",
+    "${target_dir}/patches/airscan.h",
+  ]
+  airscan_source_dir = rebase_path("${source_dir}", root_build_dir)
+  args = [
+    "--source-dir",
+    "$airscan_source_dir",
+  ]
+}
+
+config("airscan_config") {
+  cflags = [
+    "-fno-exceptions",
+    "-fdata-sections",
+    "-ffunction-sections",
+    "-fno-asynchronous-unwind-tables",
+    "-fno-unwind-tables",
+    "-flto",
+    "-Os",
+    "-DOH_AIRSCAN",
+  ]
+}
+
+ohos_shared_library("sane-airscan") {
+  include_dirs = [ "./airscan.h" ]
+  sources = [
+    "airscan-array.c",
+    "airscan-bmp.c",
+    "airscan-conf.c",
+    "airscan-devcaps.c",
+    "airscan-device.c",
+    "airscan-devid.c",
+    "airscan-devops.c",
+    "airscan-eloop.c",
+    "airscan-escl.c",
+    "airscan-filter.c",
+    "airscan-http.c",
+    "airscan-id.c",
+    "airscan-image.c",
+    "airscan-init.c",
+    "airscan-ip.c",
+    "airscan-jpeg.c",
+    "airscan-log.c",
+    "airscan-math.c",
+    "airscan-memstr.c",
+    "airscan-netif.c",
+    "airscan-os.c",
+    "airscan-png.c",
+    "airscan-pollable.c",
+    "airscan-rand.c",
+    "airscan-trace.c",
+    "airscan-xml.c",
+    "airscan-zeroconf.c",
+    "airscan.c",
+    "http_parser.c",
+    "sane_strstatus.c",
+  ]
+
+  configs = [ ":airscan_config" ]
+  deps = [ ":airscan_action" ]
+  external_deps = [
+    "backends:sane",
+    "hilog:libhilog",
+    "libjpeg-turbo:turbojpeg",
+    "libpng:libpng",
+    "libuv:uv",
+    "libxml2:libxml2",
+  ]
+
+  ldflags = [ "-ldl" ]
+
+  subsystem_name = "thirdparty"
+  part_name = "sane-airscan"
+}
+
+#the target group
+group("third_airscan") {
+  deps = [ ":sane-airscan" ]
+}
