@@ -1,0 +1,11 @@
+[
+    {
+        "Name"                  : "sane-airscan",
+        "License"               : "GPL v2",
+        "License File"          : "LICENSE",
+        "Version Number"        : "0.99.35",
+        "Owner"                 : "guoshengbang@huawei.com",
+        "Upstream URL"          : "https://github.com/alexpevzner/sane-airscan/releases/tag/0.99.35",
+        "Description"           : "sane-airscan is an implementation of the AirScan/eSCL protocol in the SANE (Scanner Access Now Easy) framework. It allows access to scanner devices that support Apple AirScan or eSCL protocols through IP networks."
+    }
+]
