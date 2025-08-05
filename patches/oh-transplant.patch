@@ -1,0 +1,1103 @@
+diff --git a/airscan-conf.c b/airscan-conf.c
+index e97d4f8..a6a91af 100644
+--- a/airscan-conf.c
++++ b/airscan-conf.c
+@@ -17,6 +17,7 @@
+ /* Configuration data
+  */
+ conf_data conf = CONF_INIT;
++#ifndef OH_AIRSCAN
+ static conf_data conf_init = CONF_INIT;
+ 
+ /* Revert conf.devices list
+@@ -530,3 +531,4 @@ conf_unload (void)
+ /* vim:ts=8:sw=4:et
+  */
+ 
++#endif // OH_AIRSCAN
+\ No newline at end of file
+diff --git a/airscan-device.c b/airscan-device.c
+index 10f89bf..14044fc 100644
+--- a/airscan-device.c
++++ b/airscan-device.c
+@@ -1187,13 +1187,12 @@ device_open (const char *ident, SANE_Status *status)
+     while (device_stm_state_get(dev) == DEVICE_STM_PROBING) {
+         eloop_cond_wait(&dev->stm_cond);
+     }
+-
+     if (device_stm_state_get(dev) == DEVICE_STM_PROBING_FAILED) {
+         device_free(dev, NULL);
+         *status = SANE_STATUS_IO_ERROR;
+         return NULL;
+     }
+-
++    
+     return dev;
+ }
+ 
+diff --git a/airscan-devops.c b/airscan-devops.c
+index 745ffe4..7bd616e 100644
+--- a/airscan-devops.c
++++ b/airscan-devops.c
+@@ -467,7 +467,11 @@ devopt_update_params (devopt *opt)
+         break;
+ 
+     default:
++#ifdef OH_AIRSCAN
++        log_assert(NULL, false);
++#else
+         log_assert(NULL, !"internal error");
++#endif // OH_AIRSCAN
+     }
+ }
+ 
+diff --git a/airscan-eloop.c b/airscan-eloop.c
+index 04931d7..f72e928 100644
+--- a/airscan-eloop.c
++++ b/airscan-eloop.c
+@@ -6,11 +6,14 @@
+  * Event loop (runs in separate thread)
+  */
+ 
+-#include "airscan.h"
+-
++ #include "airscan.h"
++ 
++#ifndef OH_AIRSCAN
+ #include <avahi-common/simple-watch.h>
+ #include <avahi-common/timeval.h>
+-
++#else
++#include <uv.h>
++#endif // OH_AIRSCAN
+ #include <errno.h>
+ #include <unistd.h>
+ 
+@@ -18,7 +21,12 @@
+ #define ELOOP_START_STOP_CALLBACKS_MAX  8
+ 
+ /******************** Static variables *********************/
++#ifndef OH_AIRSCAN
+ static AvahiSimplePoll *eloop_poll;
++#else
++static uv_loop_t *eloop_uv;
++static uv_async_t eloop_async;
++#endif // OH_AIRSCAN
+ static pthread_t eloop_thread;
+ static pthread_mutex_t eloop_mutex;
+ static bool eloop_thread_running;
+@@ -33,8 +41,13 @@ static int eloop_start_stop_callbacks_count;
+ error ERROR_ENOMEM = (error) "Out of memory";
+ 
+ /******************** Forward declarations *********************/
++#ifndef OH_AIRSCAN
+ static int
+ eloop_poll_func (struct pollfd *ufds, unsigned int nfds, int timeout, void *p);
++#else
++static void eloop_async_cb(uv_async_t* handle);
++static void on_close(uv_handle_t* handle);
++#endif // OH_AIRSCAN
+ 
+ static void
+ eloop_call_execute (void);
+@@ -68,6 +81,7 @@ eloop_init (void)
+ 
+     mutex_initialized = true;
+ 
++#ifndef OH_AIRSCAN
+     /* Create AvahiSimplePoll */
+     eloop_poll = avahi_simple_poll_new();
+     if (eloop_poll == NULL) {
+@@ -75,7 +89,10 @@ eloop_init (void)
+     }
+ 
+     avahi_simple_poll_set_func(eloop_poll, eloop_poll_func, NULL);
+-
++#else
++    eloop_uv = uv_default_loop();
++    uv_async_init(eloop_uv, &eloop_async, eloop_async_cb);
++#endif // OH_AIRSCAN
+     /* Update status */
+     status = SANE_STATUS_GOOD;
+ 
+@@ -92,16 +109,37 @@ DONE:
+     return status;
+ }
+ 
++#ifdef OH_AIRSCAN
++static void close_walk_cb(uv_handle_t* handle, void* arg) {
++    if (!uv_is_closing(handle)) {
++        uv_close(handle, on_close);
++    }
++}
++
++void on_close(uv_handle_t* handle) {
++    free(handle);
++}
++#endif // OH_AIRSCAN
++
+ /* Cleanup event loop
+  */
+ void
+ eloop_cleanup (void)
+ {
++#ifndef OH_AIRSCAN
+     if (eloop_poll != NULL) {
+         avahi_simple_poll_free(eloop_poll);
+         pthread_mutex_destroy(&eloop_mutex);
+         eloop_poll = NULL;
+     }
++#else
++    uv_walk(eloop_uv, close_walk_cb, NULL);
++    uv_run(eloop_uv, UV_RUN_ONCE);
++    pthread_mutex_destroy(&eloop_mutex);
++    if (uv_loop_close(eloop_uv) == UV_EBUSY) {
++        log_panic(NULL, "Event loop still has active handles");
++    }
++#endif // OH_AIRSCAN
+ }
+ 
+ /* Add start/stop callback. This callback is called
+@@ -122,6 +160,7 @@ eloop_add_start_stop_callback (void (*callback) (bool start))
+     eloop_start_stop_callbacks_count ++;
+ }
+ 
++#ifndef OH_AIRSCAN
+ /* Poll function hook
+  */
+ static int
+@@ -171,6 +210,11 @@ eloop_poll_func (struct pollfd *ufds, unsigned int nfds, int timeout,
+ 
+     return rc;
+ }
++#else
++static void eloop_async_cb(uv_async_t* handle) {
++    eloop_call_execute();
++}
++#endif // OH_AIRSCAN
+ 
+ /* Event loop thread main function
+  */
+@@ -188,12 +232,21 @@ eloop_thread_func (void *data)
+     }
+ 
+     __atomic_store_n(&eloop_thread_running, true, __ATOMIC_SEQ_CST);
+-
++    pthread_mutex_unlock(&eloop_mutex);
++#ifndef OH_AIRSCAN
+     do {
+-        eloop_call_execute();
+         i = avahi_simple_poll_iterate(eloop_poll, -1);
+     } while (i == 0 || (i < 0 && (errno == EINTR || errno == EBUSY)));
++#else
++    while (__atomic_load_n(&eloop_thread_running, __ATOMIC_SEQ_CST)) {
++        int active_handles = uv_run(eloop_uv, UV_RUN_ONCE);
+ 
++        if (active_handles == 0) {
++            usleep(1000);
++        }
++    }
++#endif // OH_AIRSCAN
++    pthread_mutex_lock(&eloop_mutex);
+     for (i = eloop_start_stop_callbacks_count - 1; i >= 0; i --) {
+         eloop_start_stop_callbacks[i](false);
+     }
+@@ -228,11 +281,24 @@ eloop_thread_start (void)
+ void
+ eloop_thread_stop (void)
+ {
++#ifndef OH_AIRSCAN
+     if (__atomic_load_n(&eloop_thread_running, __ATOMIC_SEQ_CST)) {
+         avahi_simple_poll_quit(eloop_poll);
+         pthread_join(eloop_thread, NULL);
+         __atomic_store_n(&eloop_thread_running, false, __ATOMIC_SEQ_CST);
+     }
++#else
++    if (!__atomic_load_n(&eloop_thread_running, __ATOMIC_SEQ_CST)) {
++        return;
++    }
++    uv_async_send(&eloop_async);
++    uv_stop(eloop_uv);
++
++    pthread_join(eloop_thread, NULL);
++    __atomic_store_n(&eloop_thread_running, false, __ATOMIC_SEQ_CST);
++
++    uv_close((uv_handle_t*)&eloop_async, NULL);
++#endif // OH_AIRSCAN
+ }
+ 
+ /* Acquire event loop mutex
+@@ -259,6 +325,7 @@ eloop_cond_wait (pthread_cond_t *cond)
+     pthread_cond_wait(cond, &eloop_mutex);
+ }
+ 
++#ifndef OH_AIRSCAN
+ /* Get AvahiPoll that runs in event loop thread
+  */
+ const AvahiPoll*
+@@ -266,6 +333,7 @@ eloop_poll_get (void)
+ {
+     return avahi_simple_poll_get(eloop_poll);
+ }
++#endif // OH_AIRSCAN
+ 
+ /* eloop_call_pending represents a pending eloop_call
+  */
+@@ -305,15 +373,16 @@ eloop_call (void (*func)(void*), void *data)
+ 
+     p->func = func;
+     p->data = data;
+-
+     pthread_mutex_lock(&eloop_mutex);
+     ret = ++ callid;
+     p->callid = ret;
+     ll_push_end(&eloop_call_pending_list, &p->node);
+     pthread_mutex_unlock(&eloop_mutex);
+-
++#ifndef OH_AIRSCAN
+     avahi_simple_poll_wakeup(eloop_poll);
+-
++#else
++    uv_async_send(&eloop_async);
++#endif // OH_AIRSCAN
+     return ret;
+ }
+ 
+@@ -411,11 +480,16 @@ eloop_event_trigger (eloop_event *event)
+  * interval
+  */
+ struct eloop_timer {
++#ifndef OH_AIRSCAN
+     AvahiTimeout *timeout;            /* Underlying AvahiTimeout */
++#else
++    uv_timer_t* timer_handle;
++#endif // OH_AIRSCAN
+     void         (*callback)(void *); /* User callback */
+     void         *data;               /* User data */
+ };
+ 
++#ifndef OH_AIRSCAN
+ /* eloop_timer callback for AvahiTimeout
+  */
+ static void
+@@ -428,12 +502,20 @@ eloop_timer_callback (AvahiTimeout *t, void *data)
+     timer->callback(timer->data);
+     eloop_timer_cancel(timer);
+ }
++#else
++static void airscan_uv_timer_cb(uv_timer_t* handle) {
++    eloop_timer* timer = (eloop_timer*)handle->data;
++    timer->callback(timer->data);
++    eloop_timer_cancel(timer);
++}
++#endif // OH_AIRSCAN
+ 
+ /* Create new timer. Timeout is in milliseconds
+  */
+ eloop_timer*
+ eloop_timer_new (int timeout, void (*callback)(void *), void *data)
+ {
++#ifndef OH_AIRSCAN
+     const AvahiPoll *poll = eloop_poll_get();
+     eloop_timer     *timer = mem_new(eloop_timer, 1);
+     struct timeval  end;
+@@ -443,8 +525,17 @@ eloop_timer_new (int timeout, void (*callback)(void *), void *data)
+     timer->timeout = poll->timeout_new(poll, &end, eloop_timer_callback, timer);
+     timer->callback = callback;
+     timer->data = data;
+-
+     return timer;
++#else
++    eloop_timer *timer = mem_new(eloop_timer, 1);
++    timer->callback = callback;
++    timer->data = data;
++    timer->timer_handle = mem_new(uv_timer_t, 1);
++    uv_timer_init(eloop_uv, timer->timer_handle);
++    timer->timer_handle->data = timer;
++    uv_timer_start(timer->timer_handle, airscan_uv_timer_cb, timeout, 0);
++    return timer;
++#endif // OH_AIRSCAN
+ }
+ 
+ /* Cancel a timer
+@@ -455,9 +546,14 @@ eloop_timer_new (int timeout, void (*callback)(void *), void *data)
+ void
+ eloop_timer_cancel (eloop_timer *timer)
+ {
++#ifndef OH_AIRSCAN
+     const AvahiPoll *poll = eloop_poll_get();
+-
++    
+     poll->timeout_free(timer->timeout);
++#else
++    uv_timer_stop(timer->timer_handle);
++    uv_close((uv_handle_t*)timer->timer_handle, on_close);
++#endif // OH_AIRSCAN
+     mem_free(timer);
+ }
+ 
+@@ -481,7 +577,11 @@ eloop_fdpoll_mask_str (ELOOP_FDPOLL_MASK mask)
+  * event mask
+  */
+ struct eloop_fdpoll {
++#ifndef OH_AIRSCAN
+     AvahiWatch        *watch;      /* Underlying AvahiWatch */
++#else
++    uv_poll_t* poll_handle;
++#endif // OH_AIRSCAN
+     int               fd;          /* Underlying file descriptor */
+     ELOOP_FDPOLL_MASK mask;        /* Mask of active events */
+     void              (*callback)( /* User-defined callback */
+@@ -489,6 +589,7 @@ struct eloop_fdpoll {
+     void              *data;       /* Callback's data */
+ };
+ 
++#ifndef OH_AIRSCAN
+ /* eloop_fdpoll callback for AvahiWatch
+  */
+ static void
+@@ -510,6 +611,23 @@ eloop_fdpoll_callback (AvahiWatch *w, int fd, AvahiWatchEvent event,
+ 
+     fdpoll->callback(fd, fdpoll->data, mask);
+ }
++#else
++static void airscan_uv_poll_cb(uv_poll_t* handle, int status, int events) {
++    if (status < 0) {
++        log_debug(NULL, "Poll error: %s", uv_strerror(status));
++        return;
++    }
++    eloop_fdpoll *fdpoll = handle->data;
++    ELOOP_FDPOLL_MASK mask = 0;
++    if (events & UV_READABLE) { 
++        mask |= ELOOP_FDPOLL_READ;
++    }
++    if (events & UV_WRITABLE) {
++        mask |= ELOOP_FDPOLL_WRITE;
++    }
++    fdpoll->callback(fdpoll->fd, fdpoll->data, mask);
++}
++#endif // OH_AIRSCAN
+ 
+ /* Create eloop_fdpoll
+  *
+@@ -523,7 +641,9 @@ eloop_fdpoll*
+ eloop_fdpoll_new (int fd,
+         void (*callback) (int, void*, ELOOP_FDPOLL_MASK), void *data)
+ {
++#ifndef OH_AIRSCAN
+     const AvahiPoll *poll = eloop_poll_get();
++#endif // OH_AIRSCAN
+     eloop_fdpoll    *fdpoll = mem_new(eloop_fdpoll, 1);
+ 
+     fdpoll->fd = fd;
+@@ -531,8 +651,21 @@ eloop_fdpoll_new (int fd,
+     fdpoll->data = data;
+ 
+     eloop_poll_restart = true;
++#ifndef OH_AIRSCAN
+     fdpoll->watch = poll->watch_new(poll, fd, 0, eloop_fdpoll_callback, fdpoll);
+-
++#else
++    fdpoll->poll_handle = mem_new(uv_poll_t, 1);
++    if (fd < 0) {
++        log_debug(NULL, "bad fd < 0");
++    }
++    if (fcntl(fd, F_GETFD) == -1) {
++        log_debug(NULL, "bad fd fcntl");
++    }
++    if (uv_poll_init(eloop_uv, fdpoll->poll_handle, fd) != 0){
++        log_debug(NULL, "uv_poll_init fail");
++    }
++    fdpoll->poll_handle->data = fdpoll;
++#endif // OH_AIRSCAN
+     return fdpoll;
+ }
+ 
+@@ -541,9 +674,14 @@ eloop_fdpoll_new (int fd,
+ void
+ eloop_fdpoll_free (eloop_fdpoll *fdpoll)
+ {
++#ifndef OH_AIRSCAN
+     const AvahiPoll *poll = eloop_poll_get();
+ 
+     poll->watch_free(fdpoll->watch);
++#else
++    uv_poll_stop(fdpoll->poll_handle);
++    uv_close((uv_handle_t*)fdpoll->poll_handle, on_close);
++#endif // OH_AIRSCAN
+     mem_free(fdpoll);
+ }
+ 
+@@ -553,8 +691,8 @@ ELOOP_FDPOLL_MASK
+ eloop_fdpoll_set_mask (eloop_fdpoll *fdpoll, ELOOP_FDPOLL_MASK mask)
+ {
+     ELOOP_FDPOLL_MASK old_mask = fdpoll->mask;
+-
+     if (old_mask != mask) {
++#ifndef OH_AIRSCAN
+         const AvahiPoll *poll = eloop_poll_get();
+         AvahiWatchEvent events = 0;
+ 
+@@ -568,11 +706,22 @@ eloop_fdpoll_set_mask (eloop_fdpoll *fdpoll, ELOOP_FDPOLL_MASK mask)
+ 
+         fdpoll->mask = mask;
+         poll->watch_update(fdpoll->watch, events);
++#else
++        int events = 0;
++        if (mask & ELOOP_FDPOLL_READ) {
++            events |= UV_READABLE;
++        }
++        if (mask & ELOOP_FDPOLL_WRITE) {
++            events |= UV_WRITABLE;
++        }
++        fdpoll->mask = mask;
++        uv_poll_start(fdpoll->poll_handle, events, airscan_uv_poll_cb);
++#endif // OH_AIRSCAN
+     }
+-
+     return old_mask;
+ }
+ 
++
+ /* Format error string, as printf() does and save result
+  * in the memory, owned by the event loop
+  *
+diff --git a/airscan-http.c b/airscan-http.c
+index 41335b3..968337f 100644
+--- a/airscan-http.c
++++ b/airscan-http.c
+@@ -5,7 +5,6 @@
+  *
+  * HTTP Client
+  */
+-#define _GNU_SOURCE
+ #include <string.h>
+ 
+ #define NO_HTTP_STATUS
+@@ -22,8 +21,10 @@
+ #include <sys/un.h>
+ #include <unistd.h>
+ 
++#ifndef OH_AIRSCAN
+ #include <avahi-common/domain.h>
+ #include <gnutls/gnutls.h>
++#endif // OH_AIRSCAN
+ 
+ /******************** Constants ********************/
+ /* I/O buffer size
+@@ -39,8 +40,10 @@
+  */
+ #define HTTP_QUERY_TIMEOUT      -1
+ 
++#ifndef OH_AIRSCAN
+ /******************** Static variables ********************/
+ static gnutls_certificate_credentials_t gnutls_cred;
++#endif // OH_AIRSCAN
+ 
+ /******************** Forward declarations ********************/
+ typedef struct http_multipart http_multipart;
+@@ -924,6 +927,7 @@ http_uri_host_is (const http_uri *uri, const char *host)
+         return !strcasecmp(uri_host, host);
+     }
+ 
++#ifndef OH_AIRSCAN
+     if (!avahi_is_valid_domain_name(uri_host)) {
+         return false;
+     }
+@@ -933,6 +937,9 @@ http_uri_host_is (const http_uri *uri, const char *host)
+     }
+ 
+     return avahi_domain_equal(uri_host, host);
++#else 
++    return false;
++#endif // OH_AIRSCAN
+ }
+ 
+ /* http_uri_host_is_literal returns true if URI uses literal
+@@ -2043,8 +2050,10 @@ struct http_query {
+     bool              addrs_freeaddrinfo;       /* Use freeaddrinfo(addrs) */
+     struct addrinfo   *addr_next;               /* Next address to try */
+     int               sock;                     /* HTTP socket */
++#ifndef OH_AIRSCAN
+     gnutls_session_t  tls;                      /* NULL if not TLS */
+     bool              handshake;                /* TLS handshake in progress */
++#endif // OH_AIRSCAN
+     bool              sending;                  /* We are now sending */
+     eloop_fdpoll      *fdpoll;                  /* Polls q->sock */
+     ip_straddr        straddr;                  /* q->sock peer addr, for log */
+@@ -2111,8 +2120,11 @@ http_query_reset (http_query *q)
+         q->addrs = NULL;
+         q->addr_next = NULL;
+     }
+-
++#ifndef OH_AIRSCAN
+     q->handshake = q->sending = false;
++#else
++    q->sending = false;
++#endif // OH_AIRSCAN
+ 
+     http_query_disconnect(q);
+ 
+@@ -2137,17 +2149,17 @@ static void
+ http_query_free (http_query *q)
+ {
+     http_query_reset(q);
+-
++    
+     http_query_timeout_cancel(q);
+     http_uri_free(q->uri);
+     http_uri_free(q->real_uri);
+     http_uri_free(q->orig_uri);
+     http_hdr_cleanup(&q->request_header);
+-
++    
+     mem_free(q->rq_buf);
+-
++    
+     http_data_unref(q->request_data);
+-
++    
+     mem_free(q);
+ }
+ 
+@@ -2290,7 +2302,7 @@ static void
+ http_query_timeout_callback (void *p)
+ {
+     http_query *q = (http_query*) p;
+-
++    
+     q->timeout_timer = NULL; /* to prevent eloop_timer_cancel() */
+     http_query_complete(q, ERROR("timeout"));
+ }
+@@ -2304,10 +2316,10 @@ void
+ http_query_timeout (http_query *q, int timeout)
+ {
+     q->timeout_value = timeout;
+-
++    
+     if (q->submitted) {
+         http_query_timeout_cancel(q);
+-
++        
+         if (timeout >= 0) {
+             log_debug(q->client->log, "HTTP using timeout: %d ms",
+                 q->timeout_value);
+@@ -2669,6 +2681,7 @@ http_query_fdpoll_callback (int fd, void *data, ELOOP_FDPOLL_MASK mask)
+     (void) fd;
+     (void) mask;
+ 
++#ifndef OH_AIRSCAN
+     if (q->handshake) {
+         rc = gnutls_handshake(q->tls);
+         if (rc < 0) {
+@@ -2688,12 +2701,14 @@ http_query_fdpoll_callback (int fd, void *data, ELOOP_FDPOLL_MASK mask)
+ 
+             return;
+         }
+-
+         log_debug(q->client->log, "HTTP done TLS handshake");
+-
++        
+         q->handshake = false;
+         http_query_fdpoll_set_mask(q, ELOOP_FDPOLL_BOTH);
+     } else if (q->sending) {
++#else
++    if (q->sending) {
++#endif // OH_AIRSCAN
+         rc = http_query_sock_send(q, q->rq_buf + q->rq_off, len);
+ 
+         if (rc > 0) {
+@@ -2833,6 +2848,7 @@ AGAIN:
+         goto AGAIN;
+     }
+ 
++#ifndef OH_AIRSCAN
+     /* Setup TLS, if required */
+     if (q->uri->scheme == HTTP_SCHEME_HTTPS) {
+         int rc = gnutls_init(&q->tls,
+@@ -2856,12 +2872,15 @@ AGAIN:
+ 
+         gnutls_transport_set_int(q->tls, q->sock);
+     }
++#endif // OH_AIRSCAN
+ 
+     /* Create fdpoll, and we are done */
+     q->fdpoll = eloop_fdpoll_new(q->sock, http_query_fdpoll_callback, q);
++#ifndef OH_AIRSCAN
+     if (q->tls != NULL) {
+         q->handshake = true;
+     }
++#endif // OH_AIRSCAN
+     q->sending = true;
+     http_query_fdpoll_set_mask(q, ELOOP_FDPOLL_WRITE);
+ }
+@@ -2875,11 +2894,12 @@ http_query_disconnect (http_query *q)
+         eloop_fdpoll_free(q->fdpoll);
+         q->fdpoll = NULL;
+     }
+-
++#ifndef OH_AIRSCAN
+     if (q->tls != NULL) {
+         gnutls_deinit(q->tls);
+         q->tls = NULL;
+     }
++#endif // OH_AIRSCAN
+ 
+     if (q->sock >= 0) {
+         close(q->sock);
+@@ -2895,19 +2915,21 @@ static ssize_t
+ http_query_sock_send (http_query *q, const void *data, size_t size)
+ {
+     ssize_t rc;
+-
++#ifndef OH_AIRSCAN
+     if (q->tls == NULL) {
++#endif // OH_AIRSCAN
+         rc = send(q->sock, data, size, MSG_NOSIGNAL);
+         if (rc < 0) {
+             rc = -errno;
+         }
++#ifndef OH_AIRSCAN
+     } else {
+         rc = gnutls_record_send(q->tls, data, size);
+         if (rc < 0) {
+             gnutls_record_discard_queued(q->tls);
+         }
+     }
+-
++#endif // OH_AIRSCAN
+     return rc;
+ }
+ 
+@@ -2917,16 +2939,18 @@ static ssize_t
+ http_query_sock_recv (http_query *q, void *data, size_t size)
+ {
+     ssize_t rc;
+-
++#ifndef OH_AIRSCAN
+     if (q->tls == NULL) {
++#endif // OH_AIRSCAN
+         rc = recv(q->sock, data, size, MSG_NOSIGNAL);
+         if (rc < 0) {
+             rc = -errno;
+         }
++#ifndef OH_AIRSCAN
+     } else {
+         rc = gnutls_record_recv(q->tls, data, size);
+     }
+-
++#endif // OH_AIRSCAN
+     return rc;
+ }
+ 
+@@ -2938,8 +2962,9 @@ http_query_sock_err (http_query *q, int rc)
+ {
+     ELOOP_FDPOLL_MASK mask = 0;
+     error             err = NULL;
+-
++#ifndef OH_AIRSCAN
+     if (q->tls == NULL) {
++#endif // OH_AIRSCAN
+         rc = -rc;
+         switch (rc) {
+         case EINTR:
+@@ -2952,7 +2977,7 @@ http_query_sock_err (http_query *q, int rc)
+         default:
+             err = ERROR(strerror(errno));
+         }
+-
++#ifndef OH_AIRSCAN
+     } else {
+         switch (rc) {
+         case GNUTLS_E_INTERRUPTED:
+@@ -2969,7 +2994,7 @@ http_query_sock_err (http_query *q, int rc)
+             }
+         }
+     }
+-
++#endif // OH_AIRSCAN
+     if (mask != 0) {
+         http_query_fdpoll_set_mask(q, mask);
+     }
+@@ -3079,7 +3104,6 @@ http_query_start_processing (void *p)
+         q->rq_buf = str_append_mem(q->rq_buf,
+             q->request_data->bytes, q->request_data->size);
+     }
+-
+     /* Connect to the host */
+     http_query_connect(q, ERROR("no host addresses available"));
+ }
+@@ -3372,8 +3396,12 @@ http_query_test_decode_response (http_query *q, const void *data, size_t size)
+ SANE_Status
+ http_init (void)
+ {
++#ifndef OH_AIRSCAN
+     int rc = gnutls_certificate_allocate_credentials(&gnutls_cred);
+     return rc == GNUTLS_E_SUCCESS ? SANE_STATUS_GOOD : SANE_STATUS_NO_MEM;
++#else 
++    return SANE_STATUS_GOOD;
++#endif // OH_AIRSCAN
+ }
+ 
+ /* Initialize HTTP client
+@@ -3381,10 +3409,12 @@ http_init (void)
+ void
+ http_cleanup (void)
+ {
++#ifndef OH_AIRSCAN
+     if (gnutls_cred != NULL) {
+         gnutls_certificate_free_credentials(gnutls_cred);
+         gnutls_cred = NULL;
+     }
++#endif // OH_AIRSCAN
+ }
+ 
+ /* vim:ts=8:sw=4:et
+diff --git a/airscan-init.c b/airscan-init.c
+index c52d503..b8eb166 100644
+--- a/airscan-init.c
++++ b/airscan-init.c
+@@ -18,7 +18,6 @@ SANE_Status
+ airscan_init (AIRSCAN_INIT_FLAGS flags, const char *log_msg)
+ {
+     SANE_Status status;
+-
+     /* Save init flags */
+     airscan_init_flags = flags;
+ 
+@@ -28,11 +27,11 @@ airscan_init (AIRSCAN_INIT_FLAGS flags, const char *log_msg)
+     if (log_msg != NULL) {
+         log_debug(NULL, "%s", log_msg);
+     }
+-
++#ifndef OH_AIRSCAN
+     if ((flags & AIRSCAN_INIT_NO_CONF) == 0) {
+         conf_load();
+     }
+-
++#endif // OH_AIRSCAN
+     log_configure(); /* As soon, as configuration is available */
+ 
+     /* Initialize all parts */
+@@ -43,19 +42,22 @@ airscan_init (AIRSCAN_INIT_FLAGS flags, const char *log_msg)
+     if (status == SANE_STATUS_GOOD) {
+         status = http_init();
+     }
++#ifndef OH_AIRSCAN
+     if (status == SANE_STATUS_GOOD) {
+         status = netif_init();
+     }
++#endif // OH_AIRSCAN
+     if (status == SANE_STATUS_GOOD) {
+         status = zeroconf_init();
+     }
++#ifndef OH_AIRSCAN
+     if (status == SANE_STATUS_GOOD) {
+         status = mdns_init();
+     }
+     if (status == SANE_STATUS_GOOD) {
+         status = wsdd_init();
+     }
+-
++#endif // OH_AIRSCAN
+     if (status != SANE_STATUS_GOOD) {
+         airscan_cleanup(NULL);
+     } else if ((flags & AIRSCAN_INIT_NO_THREAD) == 0) {
+@@ -71,10 +73,14 @@ airscan_init (AIRSCAN_INIT_FLAGS flags, const char *log_msg)
+ void
+ airscan_cleanup (const char *log_msg)
+ {
++#ifndef OH_AIRSCAN
+     mdns_cleanup();
+     wsdd_cleanup();
++#endif // OH_AIRSCAN
+     zeroconf_cleanup();
++#ifndef OH_AIRSCAN
+     netif_cleanup();
++#endif // OH_AIRSCAN
+     http_cleanup();
+     rand_cleanup();
+     eloop_cleanup();
+@@ -82,8 +88,9 @@ airscan_cleanup (const char *log_msg)
+     if (log_msg != NULL) {
+         log_debug(NULL, "%s", log_msg);
+     }
+-
++#ifndef OH_AIRSCAN
+     conf_unload();
++#endif // OH_AIRSCAN
+     trace_cleanup();
+     log_cleanup(); /* Must be the last thing to do */
+ }
+diff --git a/airscan-log.c b/airscan-log.c
+index 3b7c7fb..27b607b 100644
+--- a/airscan-log.c
++++ b/airscan-log.c
+@@ -14,6 +14,10 @@
+ #include <stdlib.h>
+ #include <unistd.h>
+ 
++#ifdef OH_AIRSCAN
++#include "hilog/log.h"
++#endif // OH_AIRSCAN
++
+ /* Static variables */
+ static char *log_buffer;
+ static bool log_configured;
+@@ -83,6 +87,7 @@ log_configure (void)
+     }
+ }
+ 
++#ifndef OH_AIRSCAN
+ /* Format time elapsed since logging began
+  */
+ static void
+@@ -100,6 +105,7 @@ log_fmt_time (char *buf, size_t size)
+ 
+     snprintf(buf, size, "%2.2d:%2.2d:%2.2d.%3.3d", hour, min, sec, msec);
+ }
++#endif // OH_AIRSCAN
+ 
+ /* log_ctx represents logging context
+  */
+@@ -152,18 +158,20 @@ static void
+ log_message (log_ctx *log, bool trace_only, bool force,
+         const char *fmt, va_list ap)
+ {
++#ifndef OH_AIRSCAN
+     trace *t = log ? log->trace : NULL;
++#endif // OH_AIRSCAN
+     char  msg[4096];
+     int   len = 0, namelen = 0, required_bytes = 0;
++#ifndef OH_AIRSCAN
+     bool  dont_log = trace_only ||
+                      (log_configured && !conf.dbg_enabled && !force);
+-
+     /* If logs suppressed and trace not in use, we have nothing
+      * to do */
+     if ((t == NULL) && dont_log) {
+         return;
+     }
+-
++#endif // OH_AIRSCAN
+     /* Format a log message */
+     if (log != NULL) {
+         len += sprintf(msg, "%.64s: ", log->name);
+@@ -188,7 +196,7 @@ log_message (log_ctx *log, bool trace_only, bool force,
+     }
+ 
+     msg[len] = '\0';
+-
++#ifndef OH_AIRSCAN
+     /* Write to log */
+     if (!dont_log) {
+         pthread_mutex_lock(&log_mutex);
+@@ -213,6 +221,9 @@ log_message (log_ctx *log, bool trace_only, bool force,
+             trace_printf(t, "");
+         }
+     }
++#else 
++    HiLogPrint(LOG_APP, LOG_INFO, 0, "sanekit", "%s", msg);
++#endif // OH_AIRSCAN
+ }
+ 
+ /* Write a debug message.
+diff --git a/airscan-mdns.c b/airscan-mdns.c
+index 5bec260..00fd178 100644
+--- a/airscan-mdns.c
++++ b/airscan-mdns.c
+@@ -11,10 +11,12 @@
+ #include <arpa/inet.h>
+ #include <net/if.h>
+ 
++#ifndef OH_AIRSCAN
+ #include <avahi-client/client.h>
+ #include <avahi-client/lookup.h>
+ #include <avahi-common/domain.h>
+ #include <avahi-common/error.h>
++#endif // OH_AIRSCAN
+ 
+ #include <fnmatch.h>
+ #include <string.h>
+diff --git a/airscan-tiff.c b/airscan-tiff.c
+index 4d6ed84..0ebd499 100644
+--- a/airscan-tiff.c
++++ b/airscan-tiff.c
+@@ -365,6 +365,7 @@ image_decoder_tiff_read_line (image_decoder *decoder, void *buffer)
+     return NULL;
+ }
+ 
++#ifndef OH_AIRSCAN
+ /* Create TIFF image decoder
+  */
+ image_decoder*
+@@ -381,9 +382,9 @@ image_decoder_tiff_new (void)
+     tiff->decoder.set_window = image_decoder_tiff_set_window;
+     tiff->decoder.read_line = image_decoder_tiff_read_line;
+     tiff->jpeg_decoder = image_decoder_jpeg_new();
+-
+     return &tiff->decoder;
+ }
++#endif
+ 
+ /***** JPEG-in-TIFF handling *****/
+ /* Prepare decoder to handle OLD JPEG format
+diff --git a/airscan-wsd.c b/airscan-wsd.c
+index f0eaf5a..7f83803 100644
+--- a/airscan-wsd.c
++++ b/airscan-wsd.c
+@@ -237,11 +237,9 @@ wsd_devcaps_parse_formats (proto_handler_wsd *wsd,
+     if (wsd->png) {
+         formats |= 1 << ID_FORMAT_PNG;
+     }
+-
+     if (wsd->tiff_single_g4 || wsd->tiff_single_g3mh) {
+         formats |= 1 << ID_FORMAT_TIFF;
+     }
+-
+     if ((formats & DEVCAPS_FORMATS_SUPPORTED) == 0) {
+         /* These used as last resort */
+         if (wsd->tiff_single_jpeg_tn2 || wsd->tiff_single_uncompressed) {
+diff --git a/airscan-zeroconf.c b/airscan-zeroconf.c
+index cea8218..345d69b 100644
+--- a/airscan-zeroconf.c
++++ b/airscan-zeroconf.c
+@@ -947,8 +947,10 @@ zeroconf_initscan_timer_callback (void *unused)
+ 
+     log_debug(zeroconf_log, "initial scan timer expired");
+ 
++#ifndef OH_AIRSCAN
+     mdns_initscan_timer_expired();
+     wsdd_initscan_timer_expired();
++#endif // OH_AIRSCAN
+ 
+     zeroconf_initscan_timer = NULL;
+     pthread_cond_broadcast(&zeroconf_initscan_cond);
+diff --git a/airscan.c b/airscan.c
+index c77230a..33b2bd6 100644
+--- a/airscan.c
++++ b/airscan.c
+@@ -8,9 +8,11 @@
+ 
+ #include "airscan.h"
+ 
++#ifndef OH_AIRSCAN
+ /* Static variables
+  */
+ static const SANE_Device **sane_device_list;
++#endif // OH_AIRSCAN
+ 
+ /* Initialize the backend
+  */
+@@ -30,11 +32,9 @@ sane_init (SANE_Int *version_code, SANE_Auth_Callback authorize)
+     if (status == SANE_STATUS_GOOD) {
+         status = device_management_init();
+     }
+-
+     if (status != SANE_STATUS_GOOD) {
+         log_debug(NULL, "API: sane_init(): %s", sane_strstatus(status));
+     }
+-
+     return status;
+ }
+ 
+@@ -51,12 +51,13 @@ sane_exit (void)
+ }
+ 
+ /* Get list of devices
+- */
++*/
+ SANE_Status
+ sane_get_devices (const SANE_Device ***device_list, SANE_Bool local_only)
+ {
+     log_debug(NULL, "API: sane_get_devices(): called");
+-
++    
++#ifndef OH_AIRSCAN
+     if (local_only && !conf.pretend_local) {
+         /* Note, all our devices are non-local */
+         static const SANE_Device *empty_devlist[1] = {0};
+@@ -71,6 +72,7 @@ sane_get_devices (const SANE_Device ***device_list, SANE_Bool local_only)
+         eloop_mutex_unlock();
+     }
+ 
++#endif // OH_AIRSCAN
+     log_debug(NULL, "API: sane_get_devices(): done");
+ 
+     return SANE_STATUS_GOOD;
+diff --git a/airscan.h b/airscan.h
+index 7001979..2c30c95 100644
+--- a/airscan.h
++++ b/airscan.h
+@@ -7,9 +7,11 @@
+ #ifndef airscan_h
+ #define airscan_h
+ 
++#ifndef OH_AIRSCAN
+ #include <avahi-common/address.h>
+ #include <avahi-common/strlst.h>
+ #include <avahi-common/watch.h>
++#endif // OH_AIRSCAN
+ 
+ #include <sane/sane.h>
+ #include <sane/saneopts.h>
+@@ -1539,10 +1541,12 @@ eloop_mutex_unlock (void);
+ void
+ eloop_cond_wait (pthread_cond_t *cond);
+ 
++#ifndef OH_AIRSCAN
+ /* Get AvahiPoll that runs in event loop thread
+  */
+ const AvahiPoll*
+ eloop_poll_get (void);
++#endif // OH_AIRSCAN
+ 
+ /* ELOOP_CALL_BADID is the invalid callid which will never be returned by
+  * the eloop_call().
+@@ -3418,10 +3422,12 @@ struct proto_handler {
+ proto_handler*
+ proto_handler_escl_new (void);
+ 
++#ifndef OH_AIRSCAN
+ /* proto_handler_wsd_new creates new WSD protocol handler
+  */
+ proto_handler*
+ proto_handler_wsd_new (void);
++#endif // OH_AIRSCAN
+ 
+ /* proto_handler_new creates new protocol handler by protocol ID
+  */
+@@ -3431,8 +3437,10 @@ proto_handler_new (ID_PROTO proto)
+     switch (proto) {
+     case ID_PROTO_ESCL:
+         return proto_handler_escl_new();
++#ifndef OH_AIRSCAN
+     case ID_PROTO_WSD:
+         return proto_handler_wsd_new();
++#endif // OH_AIRSCAN
+     default:
+         return NULL;
+     }
+@@ -3487,10 +3495,12 @@ image_decoder_jpeg_new (void);
+ image_decoder*
+ image_decoder_png_new (void);
+ 
++#ifndef OH_AIRSCAN
+ /* Create TIFF image decoder
+  */
+ image_decoder*
+ image_decoder_tiff_new (void);
++#endif
+ 
+ /* Create BMP image decoder
+  */
+@@ -3600,7 +3610,9 @@ image_decoder_create_all (image_decoder *decoders[NUM_ID_FORMAT])
+     decoders[ID_FORMAT_BMP] = image_decoder_bmp_new();
+     decoders[ID_FORMAT_JPEG] = image_decoder_jpeg_new();
+     decoders[ID_FORMAT_PNG] = image_decoder_png_new();
++#ifndef OH_AIRSCAN
+     decoders[ID_FORMAT_TIFF] = image_decoder_tiff_new();
++#endif
+ }
+ 
+ /* image_decoder_free_all destroys all decoders, previously
