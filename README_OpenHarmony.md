@@ -17,6 +17,12 @@ BUILD.gn              # GN 构建脚本
 bundle.json           # 部件描述文件
 README.OpenSource     # 开源声明文件
 ```
+### 补丁说明
+OpenHarmony 版本通过以下补丁进行了移植适配：
+- oh-transplant.patch：修改了多个源文件以适配 OpenHarmony 环境
+- 主要修改涉及：
+  - 日志系统适配（使用 hilog 替代原有日志系统）
+  - 网络接口适配（使用 libuv 替代 avahi）
 
 ## 编译指导
 
@@ -53,14 +59,6 @@ sane-airscan 无法单独使用，编译出来的驱动文件需要作为 [SANE]
 3. **功能测试**：验证设备是否正常工作。
 
 详细适配示例和代码请参考 [sane-airscan 官方文档](https://github.com/alexpevzner/sane-airscan)。
-
-## 移植说明
-
-OpenHarmony 版本通过以下补丁进行了移植适配：
-- oh-transplant.patch：修改了多个源文件以适配 OpenHarmony 环境
-- 主要修改涉及：
-  - 日志系统适配（使用 hilog 替代原有日志）
-  - 网络接口适配（使用 libuv 替代 avahi）
 
 ## 相关仓库
 
