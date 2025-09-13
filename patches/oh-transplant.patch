@@ -52,7 +52,7 @@ index 745ffe4..7bd616e 100644
  }
  
 diff --git a/airscan-eloop.c b/airscan-eloop.c
-index 04931d7..f72e928 100644
+index 04931d7..a278aa5 100644
 --- a/airscan-eloop.c
 +++ b/airscan-eloop.c
 @@ -6,11 +6,14 @@
@@ -149,7 +149,7 @@ index 04931d7..f72e928 100644
      }
 +#else
 +    uv_walk(eloop_uv, close_walk_cb, NULL);
-+    uv_run(eloop_uv, UV_RUN_ONCE);
++    while (uv_run(eloop_uv, UV_RUN_ONCE) > 0);
 +    pthread_mutex_destroy(&eloop_mutex);
 +    if (uv_loop_close(eloop_uv) == UV_EBUSY) {
 +        log_panic(NULL, "Event loop still has active handles");
@@ -166,19 +166,22 @@ index 04931d7..f72e928 100644
  /* Poll function hook
   */
  static int
-@@ -171,6 +210,11 @@ eloop_poll_func (struct pollfd *ufds, unsigned int nfds, int timeout,
+@@ -171,6 +210,14 @@ eloop_poll_func (struct pollfd *ufds, unsigned int nfds, int timeout,
  
      return rc;
  }
 +#else
 +static void eloop_async_cb(uv_async_t* handle) {
 +    eloop_call_execute();
++    if (!__atomic_load_n(&eloop_thread_running, __ATOMIC_SEQ_CST)) {
++        uv_stop(eloop_uv);
++    }
 +}
 +#endif // OH_AIRSCAN
  
  /* Event loop thread main function
   */
-@@ -188,12 +232,21 @@ eloop_thread_func (void *data)
+@@ -188,12 +235,22 @@ eloop_thread_func (void *data)
      }
  
      __atomic_store_n(&eloop_thread_running, true, __ATOMIC_SEQ_CST);
@@ -186,7 +189,7 @@ index 04931d7..f72e928 100644
 +    pthread_mutex_unlock(&eloop_mutex);
 +#ifndef OH_AIRSCAN
      do {
--        eloop_call_execute();
+         eloop_call_execute();
          i = avahi_simple_poll_iterate(eloop_poll, -1);
      } while (i == 0 || (i < 0 && (errno == EINTR || errno == EBUSY)));
 +#else
@@ -202,7 +205,7 @@ index 04931d7..f72e928 100644
      for (i = eloop_start_stop_callbacks_count - 1; i >= 0; i --) {
          eloop_start_stop_callbacks[i](false);
      }
-@@ -228,11 +281,24 @@ eloop_thread_start (void)
+@@ -228,11 +285,24 @@ eloop_thread_start (void)
  void
  eloop_thread_stop (void)
  {
@@ -216,18 +219,18 @@ index 04931d7..f72e928 100644
 +    if (!__atomic_load_n(&eloop_thread_running, __ATOMIC_SEQ_CST)) {
 +        return;
 +    }
-+    uv_async_send(&eloop_async);
-+    uv_stop(eloop_uv);
-+
-+    pthread_join(eloop_thread, NULL);
 +    __atomic_store_n(&eloop_thread_running, false, __ATOMIC_SEQ_CST);
-+
++    uv_async_send(&eloop_async);
++    
++    pthread_join(eloop_thread, NULL);
++    
 +    uv_close((uv_handle_t*)&eloop_async, NULL);
++    uv_run(eloop_uv, UV_RUN_ONCE);
 +#endif // OH_AIRSCAN
  }
  
  /* Acquire event loop mutex
-@@ -259,6 +325,7 @@ eloop_cond_wait (pthread_cond_t *cond)
+@@ -259,6 +329,7 @@ eloop_cond_wait (pthread_cond_t *cond)
      pthread_cond_wait(cond, &eloop_mutex);
  }
  
@@ -235,7 +238,7 @@ index 04931d7..f72e928 100644
  /* Get AvahiPoll that runs in event loop thread
   */
  const AvahiPoll*
-@@ -266,6 +333,7 @@ eloop_poll_get (void)
+@@ -266,6 +337,7 @@ eloop_poll_get (void)
  {
      return avahi_simple_poll_get(eloop_poll);
  }
@@ -243,7 +246,7 @@ index 04931d7..f72e928 100644
  
  /* eloop_call_pending represents a pending eloop_call
   */
-@@ -305,15 +373,16 @@ eloop_call (void (*func)(void*), void *data)
+@@ -305,15 +377,16 @@ eloop_call (void (*func)(void*), void *data)
  
      p->func = func;
      p->data = data;
@@ -263,7 +266,7 @@ index 04931d7..f72e928 100644
      return ret;
  }
  
-@@ -411,11 +480,16 @@ eloop_event_trigger (eloop_event *event)
+@@ -411,11 +484,16 @@ eloop_event_trigger (eloop_event *event)
   * interval
   */
  struct eloop_timer {
@@ -280,7 +283,7 @@ index 04931d7..f72e928 100644
  /* eloop_timer callback for AvahiTimeout
   */
  static void
-@@ -428,12 +502,20 @@ eloop_timer_callback (AvahiTimeout *t, void *data)
+@@ -428,12 +506,20 @@ eloop_timer_callback (AvahiTimeout *t, void *data)
      timer->callback(timer->data);
      eloop_timer_cancel(timer);
  }
@@ -301,7 +304,7 @@ index 04931d7..f72e928 100644
      const AvahiPoll *poll = eloop_poll_get();
      eloop_timer     *timer = mem_new(eloop_timer, 1);
      struct timeval  end;
-@@ -443,8 +525,17 @@ eloop_timer_new (int timeout, void (*callback)(void *), void *data)
+@@ -443,8 +529,17 @@ eloop_timer_new (int timeout, void (*callback)(void *), void *data)
      timer->timeout = poll->timeout_new(poll, &end, eloop_timer_callback, timer);
      timer->callback = callback;
      timer->data = data;
@@ -320,7 +323,7 @@ index 04931d7..f72e928 100644
  }
  
  /* Cancel a timer
-@@ -455,9 +546,14 @@ eloop_timer_new (int timeout, void (*callback)(void *), void *data)
+@@ -455,9 +550,14 @@ eloop_timer_new (int timeout, void (*callback)(void *), void *data)
  void
  eloop_timer_cancel (eloop_timer *timer)
  {
@@ -336,7 +339,7 @@ index 04931d7..f72e928 100644
      mem_free(timer);
  }
  
-@@ -481,7 +577,11 @@ eloop_fdpoll_mask_str (ELOOP_FDPOLL_MASK mask)
+@@ -481,7 +581,11 @@ eloop_fdpoll_mask_str (ELOOP_FDPOLL_MASK mask)
   * event mask
   */
  struct eloop_fdpoll {
@@ -348,7 +351,7 @@ index 04931d7..f72e928 100644
      int               fd;          /* Underlying file descriptor */
      ELOOP_FDPOLL_MASK mask;        /* Mask of active events */
      void              (*callback)( /* User-defined callback */
-@@ -489,6 +589,7 @@ struct eloop_fdpoll {
+@@ -489,6 +593,7 @@ struct eloop_fdpoll {
      void              *data;       /* Callback's data */
  };
  
@@ -356,7 +359,7 @@ index 04931d7..f72e928 100644
  /* eloop_fdpoll callback for AvahiWatch
   */
  static void
-@@ -510,6 +611,23 @@ eloop_fdpoll_callback (AvahiWatch *w, int fd, AvahiWatchEvent event,
+@@ -510,6 +615,23 @@ eloop_fdpoll_callback (AvahiWatch *w, int fd, AvahiWatchEvent event,
  
      fdpoll->callback(fd, fdpoll->data, mask);
  }
@@ -380,7 +383,7 @@ index 04931d7..f72e928 100644
  
  /* Create eloop_fdpoll
   *
-@@ -523,7 +641,9 @@ eloop_fdpoll*
+@@ -523,7 +645,9 @@ eloop_fdpoll*
  eloop_fdpoll_new (int fd,
          void (*callback) (int, void*, ELOOP_FDPOLL_MASK), void *data)
  {
@@ -390,7 +393,7 @@ index 04931d7..f72e928 100644
      eloop_fdpoll    *fdpoll = mem_new(eloop_fdpoll, 1);
  
      fdpoll->fd = fd;
-@@ -531,8 +651,21 @@ eloop_fdpoll_new (int fd,
+@@ -531,8 +655,21 @@ eloop_fdpoll_new (int fd,
      fdpoll->data = data;
  
      eloop_poll_restart = true;
@@ -413,7 +416,7 @@ index 04931d7..f72e928 100644
      return fdpoll;
  }
  
-@@ -541,9 +674,14 @@ eloop_fdpoll_new (int fd,
+@@ -541,9 +678,14 @@ eloop_fdpoll_new (int fd,
  void
  eloop_fdpoll_free (eloop_fdpoll *fdpoll)
  {
@@ -428,7 +431,7 @@ index 04931d7..f72e928 100644
      mem_free(fdpoll);
  }
  
-@@ -553,8 +691,8 @@ ELOOP_FDPOLL_MASK
+@@ -553,8 +695,8 @@ ELOOP_FDPOLL_MASK
  eloop_fdpoll_set_mask (eloop_fdpoll *fdpoll, ELOOP_FDPOLL_MASK mask)
  {
      ELOOP_FDPOLL_MASK old_mask = fdpoll->mask;
@@ -438,7 +441,7 @@ index 04931d7..f72e928 100644
          const AvahiPoll *poll = eloop_poll_get();
          AvahiWatchEvent events = 0;
  
-@@ -568,11 +706,22 @@ eloop_fdpoll_set_mask (eloop_fdpoll *fdpoll, ELOOP_FDPOLL_MASK mask)
+@@ -568,11 +710,22 @@ eloop_fdpoll_set_mask (eloop_fdpoll *fdpoll, ELOOP_FDPOLL_MASK mask)
  
          fdpoll->mask = mask;
          poll->watch_update(fdpoll->watch, events);
@@ -974,7 +977,7 @@ index cea8218..345d69b 100644
      zeroconf_initscan_timer = NULL;
      pthread_cond_broadcast(&zeroconf_initscan_cond);
 diff --git a/airscan.c b/airscan.c
-index c77230a..33b2bd6 100644
+index c77230a..2167842 100644
 --- a/airscan.c
 +++ b/airscan.c
 @@ -8,9 +8,11 @@
@@ -1017,10 +1020,14 @@ index c77230a..33b2bd6 100644
      if (local_only && !conf.pretend_local) {
          /* Note, all our devices are non-local */
          static const SANE_Device *empty_devlist[1] = {0};
-@@ -71,6 +72,7 @@ sane_get_devices (const SANE_Device ***device_list, SANE_Bool local_only)
+@@ -70,7 +71,10 @@ sane_get_devices (const SANE_Device ***device_list, SANE_Bool local_only)
+ 
          eloop_mutex_unlock();
      }
- 
+-
++#else
++    static const SANE_Device *empty_devlist[1] = {0};
++    *device_list = empty_devlist;
 +#endif // OH_AIRSCAN
      log_debug(NULL, "API: sane_get_devices(): done");
  
