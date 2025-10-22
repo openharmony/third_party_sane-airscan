@@ -13,11 +13,11 @@
 
 import("//build/ohos.gni")
 
-source_dir = "//third_party/third_party_sane-airscan"
+source_dir = "//third_party/sane-airscan"
 target_dir = "${target_gen_dir}/patches"
 
 action("airscan_action") {
-  script = "//third_party/third_party_sane-airscan/patch_install.py"
+  script = "//third_party/sane-airscan/patch_install.py"
   inputs = [ "${source_dir}/patches/oh-transplant.patch" ]
   outputs = [
     "${target_dir}/patches/airscan-conf.c",
@@ -104,7 +104,7 @@ ohos_shared_library("sane-airscan") {
   ldflags = [ "-ldl" ]
 
   subsystem_name = "thirdparty"
-  part_name = "third_party_sane-airscan"
+  part_name = "sane-airscan"
 }
 
 #the target group
