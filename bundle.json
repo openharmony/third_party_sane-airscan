@@ -1,17 +1,17 @@
 {
-    "name": "@ohos/third_party_sane-airscan",
+    "name": "@ohos/sane-airscan",
     "description": "sane-airscan is an implementation of the AirScan/eSCL protocol in the SANE (Scanner Access Now Easy) framework. It allows access to scanner devices that support Apple AirScan or eSCL protocols through IP networks.",
     "version": "0.99.35",
     "license": "GPL v2",
     "publishAs":"code-segment",
     "segment":{
-        "destPath":"third_party/third_party_sane-airscan"
+        "destPath":"third_party/sane-airscan"
     },
     "dirs":{},
     "scripts":{},
     "licensePath": "COPYING",
     "component": {
-        "name": "third_party_sane-airscan",
+        "name": "sane-airscan",
         "subsystem": "thirdparty",
         "syscap": [],
         "features": [],
@@ -32,7 +32,7 @@
         },
         "build": {
             "sub_component": [
-                "//third_party/third_party_sane-airscan:third_airscan"
+                "//third_party/sane-airscan:third_airscan"
             ],
             "test": []
         }
