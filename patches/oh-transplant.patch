@@ -1,3 +1,28 @@
+diff --git a/airscan-bmp.c b/airscan-bmp.c
+index 14b74a4..75cfae3 100644
+--- a/airscan-bmp.c
++++ b/airscan-bmp.c
+@@ -142,6 +142,20 @@ image_decoder_bmp_begin (image_decoder *decoder, const void *data,
+         return ERROR(bmp->error);
+     }
+ 
++    /* Sanity check: limit dimensions to prevent integer overflow
++     * in bytes_per_line calculation (pixels_per_line * 3)
++     * Max safe pixels_per_line = INT_MAX / 3 ≈ 715 million
++     * Practical limit: 50000 pixels is more than enough for scanners
++     */
++#define MAX_SAFE_BMP_DIMENSION 50000
++    if (bmp->info_header.biWidth > MAX_SAFE_BMP_DIMENSION ||
++        bmp->info_header.biWidth < 0 ||
++        labs(bmp->info_header.biHeight) > MAX_SAFE_BMP_DIMENSION) {
++        sprintf(bmp->error, "BMP: dimensions too large (width=%d, height=%d)",
++            bmp->info_header.biWidth, bmp->info_header.biHeight);
++        return ERROR(bmp->error);
++    }
++
+     /* Compute BMP row size */
+     bmp->bmp_row_size = bmp->info_header.biWidth;
+     bmp->bmp_row_size *= bmp->info_header.biBitCount / 8;
 diff --git a/airscan-conf.c b/airscan-conf.c
 index e97d4f8..a6a91af 100644
 --- a/airscan-conf.c
@@ -463,8 +488,32 @@ index 04931d7..cabc677 100644
  /* Format error string, as printf() does and save result
   * in the memory, owned by the event loop
   *
+diff --git a/airscan-escl.c b/airscan-escl.c
+index 9fa56e6..cae260a 100644
+--- a/airscan-escl.c
++++ b/airscan-escl.c
+@@ -459,6 +459,19 @@ escl_devcaps_source_parse (xml_rd *xml, devcaps_source **out)
+             goto DONE;
+         }
+ 
++        /* Sanity check: limit max dimensions to prevent integer overflow
++         * in bytes_per_line calculation (pixels_per_line * 3)
++         * Max safe pixels_per_line = INT_MAX / 3 ≈ 715 million
++         * With resolution up to 1200 DPI, safe max width ≈ 50000 pixels
++         */
++#define MAX_SAFE_DIMENSION_PX 50000
++        if (src->max_wid_px > MAX_SAFE_DIMENSION_PX) {
++            src->max_wid_px = MAX_SAFE_DIMENSION_PX;
++        }
++        if (src->max_hei_px > MAX_SAFE_DIMENSION_PX) {
++            src->max_hei_px = MAX_SAFE_DIMENSION_PX;
++        }
++
+         src->flags |= DEVCAPS_SOURCE_HAS_SIZE;
+ 
+         /* Set window ranges */
 diff --git a/airscan-http.c b/airscan-http.c
-index 41335b3..968337f 100644
+index 41335b3..5d315a2 100644
 --- a/airscan-http.c
 +++ b/airscan-http.c
 @@ -5,7 +5,6 @@
@@ -497,6 +546,15 @@ index 41335b3..968337f 100644
  
  /******************** Forward declarations ********************/
  typedef struct http_multipart http_multipart;
+@@ -757,7 +760,7 @@ http_uri*
+ http_uri_new_relative (const http_uri *base, const char *path,
+         bool strip_fragment, bool path_only)
+ {
+-    char           *buf = alloca(strlen(base->str) + strlen(path) + 1);
++    char           *buf = alloca(strlen(base->str) + strlen(path) + 2);
+     char           *end = buf;
+     http_uri       ref;
+     const http_uri *uri;
 @@ -924,6 +927,7 @@ http_uri_host_is (const http_uri *uri, const char *host)
          return !strcasecmp(uri_host, host);
      }
@@ -920,6 +978,22 @@ index 5bec260..00fd178 100644
  
  #include <fnmatch.h>
  #include <string.h>
+diff --git a/airscan-png.c b/airscan-png.c
+index 64f04ff..08b8f39 100644
+--- a/airscan-png.c
++++ b/airscan-png.c
+@@ -153,6 +153,11 @@ image_decoder_png_begin (image_decoder *decoder, const void *data,
+         png_set_strip_alpha(png->png_ptr);
+     }
+ 
++    if (png->bit_depth == 16) {
++        png_set_strip_16(png->png_ptr);
++        png->bit_depth = 8;
++    }
++
+     return NULL;
+ }
+ 
 diff --git a/airscan-tiff.c b/airscan-tiff.c
 index 4d6ed84..0ebd499 100644
 --- a/airscan-tiff.c
@@ -959,6 +1033,27 @@ index f0eaf5a..7f83803 100644
      if ((formats & DEVCAPS_FORMATS_SUPPORTED) == 0) {
          /* These used as last resort */
          if (wsd->tiff_single_jpeg_tn2 || wsd->tiff_single_uncompressed) {
+diff --git a/airscan-xml.c b/airscan-xml.c
+index 259a8fb..9600844 100644
+--- a/airscan-xml.c
++++ b/airscan-xml.c
+@@ -9,6 +9,7 @@
+ #include "airscan.h"
+ 
+ #include <fnmatch.h>
++#include <limits.h>
+ #include <stdlib.h>
+ 
+ #include <libxml/parser.h>
+@@ -421,7 +422,7 @@ xml_rd_node_value_uint (xml_rd *xml, SANE_Word *val)
+     log_assert(NULL, s != NULL);
+ 
+     v = strtoul(s, &end, 10);
+-    if (end == s || *end || v != (unsigned long) (SANE_Word) v) {
++    if (end == s || *end || v > INT_MAX) {
+         return eloop_eprintf("%s: invalid numerical value",
+                 xml_rd_node_name(xml));
+     }
 diff --git a/airscan-zeroconf.c b/airscan-zeroconf.c
 index cea8218..345d69b 100644
 --- a/airscan-zeroconf.c
@@ -1106,3 +1201,22 @@ index 7001979..2c30c95 100644
  }
  
  /* image_decoder_free_all destroys all decoders, previously
+diff --git a/http_parser.c b/http_parser.c
+index f66192d..e0914d2 100644
+--- a/http_parser.c
++++ b/http_parser.c
+@@ -2425,6 +2425,14 @@ http_parser_parse_url(const char *buf, size_t buflen, int is_connect,
+     return 1;
+   }
+ 
++  /* Reject URLs exceeding uint16_t range, as field_data[].off
++   * uses uint16_t and cannot correctly represent offsets >= 65536.
++   * This prevents potential buffer overflow when strip_fragment is used.
++   */
++  if (buflen > 65535) {
++    return 1;
++  }
++
+   u->port = u->field_set = 0;
+   s = is_connect ? s_req_server_start : s_req_spaces_before_url;
+   old_uf = UF_MAX;
