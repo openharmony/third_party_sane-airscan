@@ -24,7 +24,7 @@ index 14b74a4..75cfae3 100644
      bmp->bmp_row_size = bmp->info_header.biWidth;
      bmp->bmp_row_size *= bmp->info_header.biBitCount / 8;
 diff --git a/airscan-conf.c b/airscan-conf.c
-index e97d4f8..a6a91af 100644
+index e97d4f8..36322eb 100644
 --- a/airscan-conf.c
 +++ b/airscan-conf.c
 @@ -17,6 +17,7 @@
@@ -40,12 +40,47 @@ index e97d4f8..a6a91af 100644
   */
  
 +#endif // OH_AIRSCAN
-\ No newline at end of file
 diff --git a/airscan-device.c b/airscan-device.c
-index 10f89bf..14044fc 100644
+index 10f89bf..a8df03c 100644
 --- a/airscan-device.c
 +++ b/airscan-device.c
-@@ -1187,13 +1187,12 @@ device_open (const char *ident, SANE_Status *status)
+@@ -651,6 +651,8 @@ DONE:
+             dev->endpoint_current->next != NULL) {
+             device_probe_endpoint(dev, dev->endpoint_current->next);
+         } else {
++            log_debug(dev->log, "all endpoints probed, probing failed: %s",
++                ESTRING(err));
+             device_stm_state_set(dev, DEVICE_STM_PROBING_FAILED);
+         }
+     } else {
+@@ -878,6 +880,9 @@ device_stm_op_callback (void *ptr, http_query *q)
+              * yet set, use SANE_STATUS_IO_ERROR as default
+              * error code
+              */
++            log_debug(dev->log, "stm_op_callback: no images received, last op=%d, err=%s",
++                dev->proto_ctx.op,
++                result.err ? ESTRING(result.err) : "none");
+             device_job_set_status(dev, SANE_STATUS_IO_ERROR);
+         }
+ 
+@@ -1163,6 +1168,7 @@ device_open (const char *ident, SANE_Status *status)
+     /* Already opened? */
+     dev = device_find_by_ident(ident);
+     if (dev) {
++        log_debug(dev->log, "device_open: device \"%s\" already opened", ident);
+         *status = SANE_STATUS_DEVICE_BUSY;
+         return NULL;
+     }
+@@ -1179,6 +1185,8 @@ device_open (const char *ident, SANE_Status *status)
+     dev = device_new(devinfo);
+     *status = device_io_start(dev);
+     if (*status != SANE_STATUS_GOOD) {
++        log_debug(dev->log, "device_open: device_io_start failed: %s",
++            sane_strstatus(*status));
+         device_free(dev, NULL);
+         return NULL;
+     }
+@@ -1187,13 +1195,12 @@ device_open (const char *ident, SANE_Status *status)
      while (device_stm_state_get(dev) == DEVICE_STM_PROBING) {
          eloop_cond_wait(&dev->stm_cond);
      }
@@ -60,6 +95,122 @@ index 10f89bf..14044fc 100644
      return dev;
  }
  
+@@ -1279,7 +1286,6 @@ device_start_wait (device *dev)
+ {
+     for (;;) {
+         DEVICE_STM_STATE state = device_stm_state_get(dev);
+-
+         switch (state) {
+         case DEVICE_STM_IDLE:
+             break;
+@@ -1291,9 +1297,13 @@ device_start_wait (device *dev)
+             break;
+ 
+         case DEVICE_STM_DONE:
++            log_debug(dev->log, "device_start_wait: job done, status=%s",
++                sane_strstatus(dev->job_status));
+             return dev->job_status;
+ 
+         default:
++            log_debug(dev->log, "device_start_wait: unexpected state=%d",
++                (int) state);
+             return SANE_STATUS_GOOD;
+         }
+ 
+@@ -1385,7 +1395,8 @@ device_start (device *dev)
+ 
+     /* Don's start if window is not valid */
+     if (dev->opt.params.lines == 0 || dev->opt.params.pixels_per_line == 0) {
+-        log_debug(dev->log, "device_start: invalid scan window");
++        log_debug(dev->log, "device_start: invalid scan window (lines=%d, pixels_per_line=%d)",
++            dev->opt.params.lines, dev->opt.params.pixels_per_line);
+         return SANE_STATUS_INVAL;
+     }
+ 
+@@ -1422,10 +1433,11 @@ device_start (device *dev)
+      * Otherwise, start new job
+      */
+     log_assert (dev->log, device_stm_state_get(dev) == DEVICE_STM_DONE);
+-
+     device_stm_state_set(dev, DEVICE_STM_IDLE);
+     if (dev->job_status != SANE_STATUS_GOOD &&
+         dev->job_status != SANE_STATUS_CANCELLED) {
++        log_debug(dev->log, "device_start: previous job failed with status=%s",
++            sane_strstatus(dev->job_status));
+         dev->flags &= ~DEVICE_SCANNING;
+         return dev->job_status;
+     }
+@@ -1446,6 +1458,7 @@ device_cancel (device *dev)
+      * sane_start() and sane_read() completion)
+      */
+     if ((dev->flags & DEVICE_SCANNING) == 0) {
++        log_debug(dev->log, "device_cancel: ignored, not scanning");
+         return;
+     }
+ 
+@@ -1524,7 +1537,8 @@ device_read_next (device *dev)
+         image_format_detect(dev->read_image->bytes, dev->read_image->size);
+ 
+     if (dev->proto_ctx.format_detected  == ID_FORMAT_UNKNOWN) {
+-        err = eloop_eprintf("Can't detect image format");
++        err = eloop_eprintf("Can't detect image format (size=%zu)",
++            dev->read_image->size);
+         goto DONE;
+     }
+ 
+@@ -1566,7 +1580,9 @@ device_read_next (device *dev)
+         log_trace(dev->log, "resampling: RGB24->Grayscale8");
+     } else if (params.format != dev->opt.params.format) {
+         /* This is what we cannot handle */
+-        err = ERROR("Unexpected frame format");
++        err = eloop_eprintf("Unexpected frame format: expected %s, got %s",
++            dev->opt.params.format == SANE_FRAME_GRAY ? "Gray" : "RGB",
++            params.format == SANE_FRAME_GRAY ? "Gray" : "RGB");
+         goto DONE;
+     }
+ 
+@@ -1662,7 +1678,7 @@ device_read_next (device *dev)
+ 
+ DONE:
+     if (err != NULL) {
+-        log_debug(dev->log, ESTRING(err));
++        log_debug(dev->log, "device_read_next: failed: %s", ESTRING(err));
+         http_data_unref(dev->read_image);
+         dev->read_image = NULL;
+         return SANE_STATUS_IO_ERROR;
+@@ -1727,6 +1743,7 @@ device_read_decode_line (device *dev)
+     log_assert(dev->log, decoder != NULL);
+ 
+     if (n == dev->opt.params.lines) {
++        log_debug(dev->log, "device_read_decode_line: EOF at line %d", n);
+         return SANE_STATUS_EOF;
+     }
+ 
+@@ -1737,7 +1754,8 @@ device_read_decode_line (device *dev)
+         error err = image_decoder_read_line(decoder, dev->read_line_buf);
+ 
+         if (err != NULL) {
+-            log_debug(dev->log, ESTRING(err));
++            log_debug(dev->log, "device_read_decode_line: decode failed at line %d: %s",
++                n, ESTRING(err));
+             return SANE_STATUS_IO_ERROR;
+         }
+ 
+@@ -1795,11 +1813,14 @@ device_read (device *dev, SANE_Byte *data, SANE_Int max_len, SANE_Int *len_out)
+         }
+ 
+         if (dev->job_status == SANE_STATUS_CANCELLED) {
++            log_debug(dev->log, "device_read: job cancelled");
+             status = SANE_STATUS_CANCELLED;
+             goto DONE;
+         }
+ 
+         if (http_data_queue_empty(dev->read_queue)) {
++            log_debug(dev->log, "device_read: queue empty, job_status=%s",
++                sane_strstatus(dev->job_status));
+             status = dev->job_status;
+             log_assert(dev->log, status != SANE_STATUS_GOOD);
+             goto DONE;
 diff --git a/airscan-devops.c b/airscan-devops.c
 index 745ffe4..7bd616e 100644
 --- a/airscan-devops.c
@@ -889,7 +1040,7 @@ index c52d503..b8eb166 100644
      log_cleanup(); /* Must be the last thing to do */
  }
 diff --git a/airscan-log.c b/airscan-log.c
-index 3b7c7fb..27b607b 100644
+index 3b7c7fb..8f230be 100644
 --- a/airscan-log.c
 +++ b/airscan-log.c
 @@ -14,6 +14,10 @@
@@ -919,16 +1070,14 @@ index 3b7c7fb..27b607b 100644
  
  /* log_ctx represents logging context
   */
-@@ -152,18 +158,20 @@ static void
+@@ -152,18 +158,18 @@ static void
  log_message (log_ctx *log, bool trace_only, bool force,
          const char *fmt, va_list ap)
  {
 +#ifndef OH_AIRSCAN
      trace *t = log ? log->trace : NULL;
-+#endif // OH_AIRSCAN
-     char  msg[4096];
-     int   len = 0, namelen = 0, required_bytes = 0;
-+#ifndef OH_AIRSCAN
+-    char  msg[4096];
+-    int   len = 0, namelen = 0, required_bytes = 0;
      bool  dont_log = trace_only ||
                       (log_configured && !conf.dbg_enabled && !force);
 -
@@ -939,10 +1088,12 @@ index 3b7c7fb..27b607b 100644
      }
 -
 +#endif // OH_AIRSCAN
++    char  msg[4096];
++    int   len = 0, namelen = 0, required_bytes = 0;
      /* Format a log message */
      if (log != NULL) {
          len += sprintf(msg, "%.64s: ", log->name);
-@@ -188,7 +196,7 @@ log_message (log_ctx *log, bool trace_only, bool force,
+@@ -188,7 +194,7 @@ log_message (log_ctx *log, bool trace_only, bool force,
      }
  
      msg[len] = '\0';
@@ -951,12 +1102,16 @@ index 3b7c7fb..27b607b 100644
      /* Write to log */
      if (!dont_log) {
          pthread_mutex_lock(&log_mutex);
-@@ -213,6 +221,9 @@ log_message (log_ctx *log, bool trace_only, bool force,
+@@ -213,6 +219,13 @@ log_message (log_ctx *log, bool trace_only, bool force,
              trace_printf(t, "");
          }
      }
-+#else 
-+    HiLogPrint(LOG_APP, LOG_INFO, 0, "sanekit", "%s", msg);
++#else
++    /* Use vsnprintf to format the complete message first, then pass
++     * to HiLog with %{public}s so the content is visible.
++     * vsnprintf handles standard C format specifiers correctly,
++     * and %{public}s prevents HiLog from filtering the output. */
++    HiLogPrint(LOG_APP, LOG_INFO, 0xD001C00, "sanekit", "%{public}s", msg);
 +#endif // OH_AIRSCAN
  }
  
@@ -1070,7 +1225,7 @@ index cea8218..345d69b 100644
      zeroconf_initscan_timer = NULL;
      pthread_cond_broadcast(&zeroconf_initscan_cond);
 diff --git a/airscan.c b/airscan.c
-index c77230a..2167842 100644
+index c77230a..bae40ab 100644
 --- a/airscan.c
 +++ b/airscan.c
 @@ -8,9 +8,11 @@
@@ -1125,6 +1280,30 @@ index c77230a..2167842 100644
      log_debug(NULL, "API: sane_get_devices(): done");
  
      return SANE_STATUS_GOOD;
+@@ -237,18 +241,22 @@ sane_control_option (SANE_Handle handle, SANE_Int option, SANE_Action action,
+     log_ctx     *log = device_log_ctx(dev);
+ 
+     eloop_mutex_lock();
+-
+     /* Roughly validate arguments */
+     if (dev == NULL || value == NULL) {
++        log_debug(log, "sane_control_option: invalid argument: dev=%p value=%p",
++            (void*) dev, value);
+         goto DONE;
+     }
+ 
+     desc = device_get_option_descriptor(dev, option);
+     if (desc == NULL) {
++        log_debug(log, "sane_control_option: invalid option %d", option);
+         goto DONE;
+     }
+ 
+     if (action == SANE_ACTION_SET_VALUE && !SANE_OPTION_IS_SETTABLE(desc->cap)){
++        log_debug(log, "sane_control_option: option %d \"%s\" is not settable",
++            option, desc->name ? desc->name : "");
+         goto DONE;
+     }
+ 
 diff --git a/airscan.h b/airscan.h
 index 7001979..2c30c95 100644
 --- a/airscan.h
