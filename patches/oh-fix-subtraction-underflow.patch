@@ -1,0 +1,14 @@
+diff --git a/airscan-http.c b/airscan-http.c
+index 5d315a2..2ae914c 100644
+--- a/airscan-http.c
++++ b/airscan-http.c
+@@ -1616,7 +1616,8 @@ http_multipart_adjust_part (http_data *part)
+     part->bytes = split;
+ 
+     /* Strip CR/LF preceding next boundary, if any */
+-    if (split[part->size - 2] == '\r' && split[part->size - 1] == '\n') {
++    if (part->size >=2 &&
++        split[part->size - 2] == '\r' && split[part->size - 1] == '\n') {
+         part->size -= 2;
+     }
+ 

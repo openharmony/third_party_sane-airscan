@@ -18,7 +18,10 @@ target_dir = "${target_gen_dir}/patches"
 
 action("airscan_action") {
   script = "//third_party/sane-airscan/patch_install.py"
-  inputs = [ "${source_dir}/patches/oh-transplant.patch" ]
+  inputs = [
+    "${source_dir}/patches/oh-transplant.patch",
+    "${source_dir}/patches/oh-fix-subtraction-underflow.patch",
+  ]
   outputs = [
     "${target_dir}/patches/airscan-conf.c",
     "${target_dir}/patches/airscan-devops.c",
@@ -52,6 +55,8 @@ config("airscan_config") {
     "-flto",
     "-Os",
     "-DOH_AIRSCAN",
+    "-D_FORTIFY_SOURCE=2",
+    "-fstack-protector-all",
   ]
 }
 
