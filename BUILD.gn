@@ -55,7 +55,6 @@ config("airscan_config") {
     "-flto",
     "-Os",
     "-DOH_AIRSCAN",
-    "-D_FORTIFY_SOURCE=2",
     "-fstack-protector-all",
   ]
 }
