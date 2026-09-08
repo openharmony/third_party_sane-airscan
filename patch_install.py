@@ -24,6 +24,7 @@ import shutil
 def apply_patch(source_dir):
     patch_list = [
         'oh-transplant.patch',
+        'oh-fix-subtraction-underflow.patch',
     ]
 
     for patch in patch_list:
