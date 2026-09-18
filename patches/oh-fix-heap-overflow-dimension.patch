@@ -1,0 +1,36 @@
+diff --git a/airscan-device.c b/airscan-device.c
+index 10f89bf..a7653bd 100644
+--- a/airscan-device.c
++++ b/airscan-device.c
+@@ -28,6 +28,14 @@
+  */
+ #define DEVICE_HTTP_TIMEOUT_CANCELED_OP 10000
+ 
++/* Maximum image dimensions accepted by the decoder, to prevent
++ * integer overflow in line_capacity computation (win.wid * 3)
++ * and math_max int32 truncation in device_read_next().
++ * With pixels_per_line <= 50000, wid * 3 = 150000 < INT32_MAX.
++ */
++#define MAX_DECODER_IMAGE_WIDTH         50000
++#define MAX_DECODER_IMAGE_HEIGHT        50000
++
+ /******************** Device management ********************/
+ /* Device flags
+  */
+@@ -1558,6 +1566,16 @@ device_read_next (device *dev)
+     log_trace(dev->log, "  color depth:    %d", params.depth);
+     log_trace(dev->log, "");
+ 
++    if (params.pixels_per_line <= 0 ||
++        params.pixels_per_line > MAX_DECODER_IMAGE_WIDTH ||
++        params.lines <= 0 ||
++        params.lines > MAX_DECODER_IMAGE_HEIGHT ||
++        params.bytes_per_line <= 0) {
++        err = eloop_eprintf("Invalid image parameters: %dx%d, bpl=%d",
++            params.pixels_per_line, params.lines, params.bytes_per_line);
++        goto DONE;
++    }
++
+     /* Validate image parameters */
+     dev->read_24_to_8 = false;
+     if (params.format == SANE_FRAME_RGB &&
