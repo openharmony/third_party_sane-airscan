@@ -21,6 +21,7 @@ action("airscan_action") {
   inputs = [
     "${source_dir}/patches/oh-transplant.patch",
     "${source_dir}/patches/oh-fix-subtraction-underflow.patch",
+    "${source_dir}/patches/oh-fix-resolution-overflow.patch",
   ]
   outputs = [
     "${target_dir}/patches/airscan-conf.c",
