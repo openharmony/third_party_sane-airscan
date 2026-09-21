@@ -21,10 +21,12 @@ action("airscan_action") {
   inputs = [
     "${source_dir}/patches/oh-transplant.patch",
     "${source_dir}/patches/oh-fix-subtraction-underflow.patch",
+    "${source_dir}/patches/oh-fix-heap-overflow-dimension.patch",
     "${source_dir}/patches/oh-fix-resolution-overflow.patch",
   ]
   outputs = [
     "${target_dir}/patches/airscan-conf.c",
+    "${target_dir}/patches/airscan-device.c",
     "${target_dir}/patches/airscan-devops.c",
     "${target_dir}/patches/airscan-eloop.c",
     "${target_dir}/patches/airscan-http.c",
