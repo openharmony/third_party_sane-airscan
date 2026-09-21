@@ -27,6 +27,7 @@ def apply_patch(source_dir):
         'oh-fix-subtraction-underflow.patch',
         'oh-fix-heap-overflow-dimension.patch',
         'oh-fix-resolution-overflow.patch',
+        'oh-fix-http-hdr-params-parse-null-deref.patch',
     ]
 
     for patch in patch_list:
