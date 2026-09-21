@@ -26,6 +26,7 @@ def apply_patch(source_dir):
         'oh-transplant.patch',
         'oh-fix-subtraction-underflow.patch',
         'oh-fix-heap-overflow-dimension.patch',
+        'oh-fix-resolution-overflow.patch',
     ]
 
     for patch in patch_list:

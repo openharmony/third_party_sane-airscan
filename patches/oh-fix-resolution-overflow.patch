@@ -1,0 +1,34 @@
+diff --git a/airscan-devops.c b/airscan-devops.c
+index 7bd616e..d351736 100644
+--- a/airscan-devops.c
++++ b/airscan-devops.c
+@@ -134,6 +134,16 @@ devopt_choose_colormode (devopt *opt, ID_COLORMODE wanted)
+     return wanted;
+ }
+ 
++/* Upper bound for the scanner-declared resolution, in DPI.
++ *
++ * Devices report their own capabilities, so this is untrusted input:
++ * it feeds the pixels_per_line and bytes_per_line arithmetic in
++ * devopt_update_params(), which does not tolerate an unbounded factor.
++ * 12000 covers every real device -- the OH scan UI caps the resolution
++ * at 1200 DPI, and drum scanners, the highest class, top out at 12000.
++ */
++#define DEVOPT_MAX_DPI       12000
++
+ /* Choose appropriate scanner resolution
+  */
+ static SANE_Word
+@@ -156,9 +166,10 @@ devopt_choose_resolution (devopt *opt, SANE_Word wanted)
+             }
+         }
+ 
+-        return res;
++        return math_min(res, DEVOPT_MAX_DPI);
+     } else {
+-        return math_range_fit(&src->res_range, wanted);
++        return math_min(math_range_fit(&src->res_range, wanted),
++                DEVOPT_MAX_DPI);
+     }
+ }
+ 
