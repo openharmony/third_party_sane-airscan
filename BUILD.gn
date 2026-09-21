@@ -22,6 +22,7 @@ action("airscan_action") {
     "${source_dir}/patches/oh-transplant.patch",
     "${source_dir}/patches/oh-fix-subtraction-underflow.patch",
     "${source_dir}/patches/oh-fix-heap-overflow-dimension.patch",
+    "${source_dir}/patches/oh-fix-resolution-overflow.patch",
     "${source_dir}/patches/oh-fix-http-hdr-params-parse-null-deref.patch",
   ]
   outputs = [
