@@ -1,0 +1,346 @@
+diff --git a/airscan-device.c b/airscan-device.c
+index eb9f3ae..1b10c35 100644
+--- a/airscan-device.c
++++ b/airscan-device.c
+@@ -150,6 +150,12 @@ struct device {
+                                                 beginning */
+     bool                 read_24_to_8;       /* Resample 24 to 8 bits */
+     filter               *read_filters;      /* Chain of image filters */
++
++    /* UAF protection: delayed free + entry validation */
++    bool                 closed;             /* device_close has been called */
++    int                  scan_in_progress;   /* sane_read/sane_start in flight */
++    pthread_cond_t       close_cond;         /* Signalled when scan_in_progress
++                                                reaches zero */
+ };
+ 
+ /* Static variables
+@@ -231,6 +237,9 @@ device_new (zeroconf_devinfo *devinfo)
+     dev->proto_ctx.http = http_client_new(dev->log, dev);
+ 
+     pthread_cond_init(&dev->stm_cond, NULL);
++    pthread_cond_init(&dev->close_cond, NULL);
++    dev->closed = false;
++    dev->scan_in_progress = 0;
+ 
+     dev->read_pollable = pollable_new();
+     dev->read_queue = http_data_queue_new();
+@@ -292,6 +301,7 @@ device_free (device *dev, const char *log_msg)
+     mem_free((char*) dev->proto_ctx.location);
+ 
+     pthread_cond_destroy(&dev->stm_cond);
++    pthread_cond_destroy(&dev->close_cond);
+     image_decoder_free_all(dev->decoders);
+     http_data_queue_free(dev->read_queue);
+     pollable_free(dev->read_pollable);
+@@ -1156,6 +1166,50 @@ device_log_ctx (device *dev)
+     return dev ? dev->log : NULL;
+ }
+ 
++/* Validate that a device handle is still alive (not closed).
++ * Must be called with eloop_mutex held.
++ */
++bool
++device_validate (device *dev)
++{
++    if (dev == NULL) {
++        return false;
++    }
++    return ptr_array_find(device_table, dev) >= 0;
++}
++
++/* Increment scan-in-progress counter.
++ * Must be called with eloop_mutex held.
++ */
++void
++device_scan_begin (device *dev)
++{
++    dev->scan_in_progress++;
++}
++
++/* Decrement scan-in-progress counter and wake device_close if waiting.
++ * Must be called with eloop_mutex held.
++ */
++void
++device_scan_end (device *dev)
++{
++    dev->scan_in_progress--;
++    if (dev->closed && dev->scan_in_progress == 0) {
++        pthread_cond_broadcast(&dev->close_cond);
++    }
++}
++
++/* Check if device has been closed (for lock-free callers like sane_cancel).
++ */
++bool
++device_is_closed (device *dev)
++{
++    if (dev == NULL) {
++        return true;
++    }
++    return __atomic_load_n(&dev->closed, __ATOMIC_SEQ_CST);
++}
++
+ /* Open a device
+  */
+ device*
+@@ -1225,6 +1279,17 @@ device_close (device *dev, const char *log_msg)
+ 
+     /* Close the device */
+     device_stm_state_set(dev, DEVICE_STM_CLOSED);
++
++    /* Mark as closed and remove from device_table so that
++     * device_validate() will reject subsequent sane_* calls */
++    dev->closed = true;
++    ptr_array_del(device_table, ptr_array_find(device_table, dev));
++
++    /* Wait until all in-flight sane_read/sane_start calls exit */
++    while (dev->scan_in_progress > 0) {
++        eloop_cond_wait(&dev->close_cond);
++    }
++
+     device_free(dev, log_msg);
+ }
+ 
+diff --git a/airscan.c b/airscan.c
+index bae40ab..b634662 100644
+--- a/airscan.c
++++ b/airscan.c
+@@ -125,9 +125,12 @@ sane_close (SANE_Handle handle)
+ {
+     device  *dev = (device*) handle;
+ 
+-    log_debug(device_log_ctx(dev), "API: sane_close(): called");
+-
+     eloop_mutex_lock();
++    if (!device_validate(dev)) {
++        eloop_mutex_unlock();
++        return;
++    }
++    log_debug(device_log_ctx(dev), "API: sane_close(): called");
+     device_close((device*) handle, "API: sane_close(): done");
+     eloop_mutex_unlock();
+ }
+@@ -138,16 +141,19 @@ const SANE_Option_Descriptor *
+ sane_get_option_descriptor (SANE_Handle handle, SANE_Int option)
+ {
+     device  *dev = (device*) handle;
+-    log_ctx *log = device_log_ctx(dev);
+     const SANE_Option_Descriptor *desc;
+ 
+-    log_debug(log, "API: device_get_option_descriptor(): called");
+-
+     eloop_mutex_lock();
++    if (!device_validate(dev)) {
++        eloop_mutex_unlock();
++        return NULL;
++    }
++    log_debug(device_log_ctx(dev), "API: device_get_option_descriptor(): called");
++
+     desc = device_get_option_descriptor(dev, option);
+     eloop_mutex_unlock();
+ 
+-    log_debug(log, "API: device_get_option_descriptor(): done");
++    log_debug(device_log_ctx(dev), "API: device_get_option_descriptor(): done");
+ 
+     return desc;
+ }
+@@ -237,10 +243,17 @@ sane_control_option (SANE_Handle handle, SANE_Int option, SANE_Action action,
+ {
+     SANE_Status status = SANE_STATUS_INVAL;
+     device      *dev = (device*) handle;
+-    const       SANE_Option_Descriptor *desc;
+-    log_ctx     *log = device_log_ctx(dev);
++    const       SANE_Option_Descriptor *desc = NULL;
++    log_ctx     *log;
+ 
+     eloop_mutex_lock();
++
++    if (!device_validate(dev)) {
++        eloop_mutex_unlock();
++        return SANE_STATUS_INVAL;
++    }
++    log = device_log_ctx(dev);
++
+     /* Roughly validate arguments */
+     if (dev == NULL || value == NULL) {
+         log_debug(log, "sane_control_option: invalid argument: dev=%p value=%p",
+@@ -270,7 +283,7 @@ sane_control_option (SANE_Handle handle, SANE_Int option, SANE_Action action,
+ DONE:
+     eloop_mutex_unlock();
+ 
+-    if (status == SANE_STATUS_GOOD) {
++    if (status == SANE_STATUS_GOOD && desc != NULL) {
+         sane_control_option_log(log, desc, option, action, value,
+             info ? *info : 0);
+     }
+@@ -285,17 +298,19 @@ sane_get_parameters (SANE_Handle handle, SANE_Parameters *params)
+ {
+     SANE_Status status = SANE_STATUS_GOOD;
+     device      *dev = (device*) handle;
+-    log_ctx     *log = device_log_ctx(dev);
+-
+-    log_debug(log, "API: sane_get_params(): called");
+ 
+     if (params != NULL) {
+         eloop_mutex_lock();
++        if (!device_validate(dev)) {
++            eloop_mutex_unlock();
++            return SANE_STATUS_INVAL;
++        }
++        log_debug(device_log_ctx(dev), "API: sane_get_params(): called");
+         status = device_get_parameters(dev, params);
+         eloop_mutex_unlock();
+     }
+ 
+-    log_debug(log, "API: sane_get_params(): done");
++    log_debug(device_log_ctx(dev), "API: sane_get_params(): done");
+ 
+     return status;
+ }
+@@ -307,15 +322,21 @@ sane_start (SANE_Handle handle)
+ {
+     SANE_Status status;
+     device      *dev = (device*) handle;
+-    log_ctx     *log = device_log_ctx(dev);
+-
+-    log_debug(log, "API: sane_start(): called");
+ 
+     eloop_mutex_lock();
++    if (!device_validate(dev)) {
++        eloop_mutex_unlock();
++        return SANE_STATUS_INVAL;
++    }
++    log_debug(device_log_ctx(dev), "API: sane_start(): called");
++
++    device_scan_begin(dev);
+     status = device_start(dev);
++    device_scan_end(dev);
++
+     eloop_mutex_unlock();
+ 
+-    log_debug(log, "API: sane_start(): %s", sane_strstatus(status));
++    log_debug(device_log_ctx(dev), "API: sane_start(): %s", sane_strstatus(status));
+ 
+     return status;
+ }
+@@ -327,10 +348,19 @@ sane_read (SANE_Handle handle, SANE_Byte *data, SANE_Int max_len, SANE_Int *len)
+ {
+     SANE_Status status;
+     device      *dev = (device*) handle;
+-    log_ctx     *log = device_log_ctx(dev);
++    log_ctx     *log;
+ 
+     eloop_mutex_lock();
++    if (!device_validate(dev)) {
++        eloop_mutex_unlock();
++        return SANE_STATUS_INVAL;
++    }
++    log = device_log_ctx(dev);
++
++    device_scan_begin(dev);
+     status = device_read(dev, data, max_len, len);
++    device_scan_end(dev);
++
+     eloop_mutex_unlock();
+ 
+     /* Note, as a special exception, we don't log every successful
+@@ -352,8 +382,13 @@ sane_cancel (SANE_Handle handle)
+     device *dev = handle;
+ 
+     /* Note, no mutex lock here and no logging. We can be called from
+-     * signal handler. device_cancel() properly handles it
++     * signal handler. device_cancel() properly handles it.
++     * Check closed flag atomically 鈥?if device is already closed,
++     * the handle is dangling and must not be touched.
+      */
++    if (device_is_closed(dev)) {
++        return;
++    }
+     device_cancel(dev);
+ }
+ 
+@@ -364,16 +399,19 @@ sane_set_io_mode (SANE_Handle handle, SANE_Bool non_blocking)
+ {
+     SANE_Status status;
+     device      *dev = (device*) handle;
+-    log_ctx     *log = device_log_ctx(dev);
+     const char  *mode = non_blocking ? "true" : "false";
+ 
+-    log_debug(log, "API: sane_set_io_mode(%s): called", mode);
+-
+     eloop_mutex_lock();
++    if (!device_validate(dev)) {
++        eloop_mutex_unlock();
++        return SANE_STATUS_INVAL;
++    }
++    log_debug(device_log_ctx(dev), "API: sane_set_io_mode(%s): called", mode);
++
+     status = device_set_io_mode(dev, non_blocking);
+     eloop_mutex_unlock();
+ 
+-    log_debug(log, "API: sane_set_io_mode(%s): %s", mode,
++    log_debug(device_log_ctx(dev), "API: sane_set_io_mode(%s): %s", mode,
+         sane_strstatus(status));
+ 
+     return status;
+@@ -386,18 +424,21 @@ sane_get_select_fd (SANE_Handle handle, SANE_Int *fd)
+ {
+     SANE_Status status;
+     device      *dev = (device*) handle;
+-    log_ctx     *log = device_log_ctx(dev);
+-
+-    log_debug(log, "API: sane_get_select_fd(): called");
+ 
+     eloop_mutex_lock();
++    if (!device_validate(dev)) {
++        eloop_mutex_unlock();
++        return SANE_STATUS_INVAL;
++    }
++    log_debug(device_log_ctx(dev), "API: sane_get_select_fd(): called");
++
+     status = device_get_select_fd(dev, fd);
+     eloop_mutex_unlock();
+ 
+     if (status == SANE_STATUS_GOOD) {
+-        log_debug(log, "API: sane_get_select_fd(): fd = %d", *fd);
++        log_debug(device_log_ctx(dev), "API: sane_get_select_fd(): fd = %d", *fd);
+     } else {
+-        log_debug(log, "API: sane_get_select_fd(): %s", sane_strstatus(status));
++        log_debug(device_log_ctx(dev), "API: sane_get_select_fd(): %s", sane_strstatus(status));
+     }
+ 
+     return status;
+diff --git a/airscan.h b/airscan.h
+index 2c30c95..5413332 100644
+--- a/airscan.h
++++ b/airscan.h
+@@ -3199,6 +3199,28 @@ device_close (device *dev, const char *log_msg);
+ log_ctx*
+ device_log_ctx (device *dev);
+ 
++/* Validate that a device handle is still alive (not closed).
++ * Must be called with eloop_mutex held.
++ */
++bool
++device_validate (device *dev);
++
++/* Increment scan-in-progress counter. Must be called with eloop_mutex held.
++ */
++void
++device_scan_begin (device *dev);
++
++/* Decrement scan-in-progress counter and wake device_close if waiting.
++ * Must be called with eloop_mutex held.
++ */
++void
++device_scan_end (device *dev);
++
++/* Check if device has been closed (for lock-free callers like sane_cancel).
++ */
++bool
++device_is_closed (device *dev);
++
+ /* Get option descriptor
+  */
+ const SANE_Option_Descriptor*

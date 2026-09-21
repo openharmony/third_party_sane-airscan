@@ -23,6 +23,7 @@ action("airscan_action") {
     "${source_dir}/patches/oh-fix-subtraction-underflow.patch",
     "${source_dir}/patches/oh-fix-heap-overflow-dimension.patch",
     "${source_dir}/patches/oh-fix-resolution-overflow.patch",
+    "${source_dir}/patches/oh-fix-device-handle-use-after-free.patch",
   ]
   outputs = [
     "${target_dir}/patches/airscan-conf.c",
