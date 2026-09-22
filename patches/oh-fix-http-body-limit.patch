@@ -1,0 +1,46 @@
+diff --git a/airscan-http.c b/airscan-http.c
+--- a/airscan-http.c
++++ b/airscan-http.c
+@@ -39,6 +39,16 @@
+  * Disabled, if negative
+  */
+ #define HTTP_QUERY_TIMEOUT      -1
++
++/* Maximum response body size, bytes. Guards against memory exhaustion
++ * caused by a malicious peer streaming an oversized (or unbounded
++ * chunked) response. Covers all ops including eSCL LOAD image download
++ * and sane_open() devcaps probing. Override via BUILD.gn cflags
++ * (-DHTTP_MAX_BODY_SIZE=...) if a product needs a different ceiling.
++ */
++#ifndef HTTP_MAX_BODY_SIZE
++#define HTTP_MAX_BODY_SIZE      (1024ULL * 1024ULL * 1024ULL)
++#endif
+
+ #ifndef OH_AIRSCAN
+ /******************** Static variables ********************/
+@@ -2071,6 +2081,8 @@
+     http_data         *request_data;            /* NULL if none */
+     http_data         *response_data;           /* NULL if none */
+     http_multipart    *response_multipart;      /* NULL if not multipart */
++    uint64_t          response_body_total;      /* Total body bytes received,
++                                                    not reset on redirect */
+
+     /* Callbacks and context */
+     timestamp         timestamp;                /* Submission timestamp */
+@@ -2588,7 +2600,16 @@
+
+     if (size == 0) {
+         return 0; /* Just in case */
++    }
++
++    if (q->response_body_total + size > HTTP_MAX_BODY_SIZE) {
++        log_debug(q->client->log,
++            "HTTP response body exceeds %llu bytes limit, aborting",
++            (unsigned long long) HTTP_MAX_BODY_SIZE);
++        q->err = ERROR("response body too large");
++        return 1;
+     }
++    q->response_body_total += size;
+
+     if (q->response_data == NULL) {
+         q->response_data = http_data_new(NULL, NULL, 0);
