@@ -1,0 +1,44 @@
+diff --git a/airscan-devops.c b/airscan-devops.c
+index 745ffe4..3a9bf3e 100644
+--- a/airscan-devops.c
++++ b/airscan-devops.c
+@@ -125,12 +125,15 @@ devopt_choose_colormode (devopt *opt, ID_COLORMODE wanted)
+ 
+     /* Nothing found in a previous step. Just choose the best mode
+-     * supported by the scanner */
+-    wanted = (ID_COLORMODE) 0;
+-    while ((colormodes & (1 << wanted)) == 0) {
+-        log_assert(NULL, wanted < NUM_ID_COLORMODE);
+-        wanted ++;
++     * supported by the scanner. If none is set (shouldn't happen -
++     * escl_devcaps_source_parse rejects colormodes=0 sources),
++     * default to COLOR instead of aborting. */
++    for (wanted = (ID_COLORMODE) 0; wanted < NUM_ID_COLORMODE; wanted ++) {
++        if ((colormodes & (1 << wanted)) != 0) {
++            return wanted;
++        }
+     }
+-
+-    return wanted;
++    log_debug(NULL, "devopt_choose_colormode: no color modes available; defaulting to color");
++    src->colormodes = (1 << ID_COLORMODE_COLOR);
++    return ID_COLORMODE_COLOR;
+ }
+ 
+diff --git a/airscan-escl.c b/airscan-escl.c
+index 9fa56e6..e078a57 100644
+--- a/airscan-escl.c
++++ b/airscan-escl.c
+@@ -445,4 +445,12 @@ escl_devcaps_source_parse (xml_rd *xml, devcaps_source **out)
+     }
+ 
++    /* Validate color modes regardless of whether SettingProfiles
++     * was present in the XML */
++    src->colormodes &= DEVCAPS_COLORMODES_SUPPORTED;
++    if (src->colormodes == 0) {
++        err = ERROR("no color modes detected");
++        goto DONE;
++    }
++
+     if (src->max_wid_px != 0 && src->max_hei_px != 0)
+     {
