@@ -1,0 +1,32 @@
+diff --git a/airscan-http.c b/airscan-http.c
+index 2ae914c..339487a 100644
+--- a/airscan-http.c
++++ b/airscan-http.c
+@@ -1484,18 +1484,24 @@ http_hdr_params_parse (http_hdr *params, const char *name, const char *in)
+             } else if (c == '"') {
+                 state = SP4;
+             } else {
+-                field->value = str_append_c(field->value, c);
++                if (field != NULL) {
++                    field->value = str_append_c(field->value, c);
++                }
+             }
+             break;
+ 
+         case STRING_BSLASH:
+-            field->value = str_append_c(field->value, c);
++            if (field != NULL) {
++                field->value = str_append_c(field->value, c);
++            }
+             state = STRING;
+             break;
+ 
+         case TOKEN:
+             if (c != ';' && c != '"' && !safe_isspace(c)) {
+-                field->value = str_append_c(field->value, c);
++                if (field != NULL) {
++                    field->value = str_append_c(field->value, c);
++                }
+             } else {
+                 state = SP4;
+                 continue;
