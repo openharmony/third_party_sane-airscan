@@ -29,6 +29,7 @@ def apply_patch(source_dir):
         'oh-fix-resolution-overflow.patch',
         'oh-fix-http-hdr-params-parse-null-deref.patch',
         'oh-fix-device-handle-use-after-free.patch',
+        'oh-fix-http-body-limit.patch',
     ]
 
     for patch in patch_list:

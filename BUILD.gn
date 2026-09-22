@@ -25,6 +25,7 @@ action("airscan_action") {
     "${source_dir}/patches/oh-fix-resolution-overflow.patch",
     "${source_dir}/patches/oh-fix-http-hdr-params-parse-null-deref.patch",
     "${source_dir}/patches/oh-fix-device-handle-use-after-free.patch",
+    "${source_dir}/patches/oh-fix-http-body-limit.patch",
   ]
   outputs = [
     "${target_dir}/patches/airscan-conf.c",
