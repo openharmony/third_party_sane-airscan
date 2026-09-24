@@ -27,6 +27,7 @@ action("airscan_action") {
     "${source_dir}/patches/oh-fix-device-handle-use-after-free.patch",
     "${source_dir}/patches/oh-fix-http-body-limit.patch",
     "${source_dir}/patches/oh-fix-empty-source-caps.patch",
+    "${source_dir}/patches/oh-fix-eloop-uv-run-mutex-serialization.patch",
   ]
   outputs = [
     "${target_dir}/patches/airscan-conf.c",

@@ -1,0 +1,32 @@
+diff --git a/airscan-eloop.c b/airscan-eloop.c
+index cabc677..9b93f1d 100644
+--- a/airscan-eloop.c
++++ b/airscan-eloop.c
+@@ -236,7 +236,6 @@ eloop_thread_func (void *data)
+     }
+ 
+     __atomic_store_n(&eloop_thread_running, true, __ATOMIC_SEQ_CST);
+-    pthread_mutex_unlock(&eloop_mutex);
+ #ifndef OH_AIRSCAN
+     do {
+         eloop_call_execute();
+@@ -244,14 +243,13 @@ eloop_thread_func (void *data)
+     } while (i == 0 || (i < 0 && (errno == EINTR || errno == EBUSY)));
+ #else
+     while (__atomic_load_n(&eloop_thread_running, __ATOMIC_SEQ_CST)) {
+-        int active_handles = uv_run(eloop_uv, UV_RUN_ONCE);
+-
+-        if (active_handles == 0) {
+-            usleep(1000);
+-        }
++        eloop_call_execute();
++        uv_run(eloop_uv, UV_RUN_NOWAIT);
++        pthread_mutex_unlock(&eloop_mutex);
++        usleep(1000);
++        pthread_mutex_lock(&eloop_mutex);
+     }
+ #endif // OH_AIRSCAN
+-    pthread_mutex_lock(&eloop_mutex);
+     for (i = eloop_start_stop_callbacks_count - 1; i >= 0; i --) {
+         eloop_start_stop_callbacks[i](false);
+     }

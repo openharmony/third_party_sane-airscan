@@ -31,6 +31,7 @@ def apply_patch(source_dir):
         'oh-fix-device-handle-use-after-free.patch',
         'oh-fix-http-body-limit.patch',
         'oh-fix-empty-source-caps.patch',
+        'oh-fix-eloop-uv-run-mutex-serialization.patch',
     ]
 
     for patch in patch_list:
