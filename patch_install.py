@@ -28,7 +28,6 @@ def apply_patch(source_dir):
         'oh-fix-heap-overflow-dimension.patch',
         'oh-fix-resolution-overflow.patch',
         'oh-fix-http-hdr-params-parse-null-deref.patch',
-        'oh-fix-device-handle-use-after-free.patch',
         'oh-fix-http-body-limit.patch',
         'oh-fix-empty-source-caps.patch',
     ]
