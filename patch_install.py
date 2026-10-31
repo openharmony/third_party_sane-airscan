@@ -47,9 +47,12 @@ def apply_patch(source_dir):
                 paths.add(relative)
 
     def execute_patch(directory, name, reverse=False):
-        command = ['patch', '--batch', '-p1', '--fuzz=0', '--no-backup-if-mismatch',
+        # -N also applies to -R: reject an unreversed patch instead of letting
+        # --batch silently ignore -R and apply it forwards during rollback.
+        command = ['patch', '--batch', '--forward', '-p1', '--fuzz=0', '--no-backup-if-mismatch',
                    '-i', str(Path(source_dir) / 'patches' / name), '-d', str(directory)]
-        command.append('--reverse' if reverse else '--forward')
+        if reverse:
+            command.append('--reverse')
         return subprocess.run(command, text=True, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT)
 
