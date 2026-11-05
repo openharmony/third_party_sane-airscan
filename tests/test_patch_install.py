@@ -13,11 +13,16 @@
 # limitations under the License.
 """Exercise the real series starting from Git contents, not a built source tree."""
 import importlib.util
+import json
+import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SERIES = (
@@ -95,6 +100,184 @@ class PatchInstallTest(unittest.TestCase):
                 MODULE.apply_patch(str(root))
             self.assertEqual(before, source_state(root))
             self.assertFalse(list(root.rglob('*.rej')))
+
+
+class RelativeDepfileTest(unittest.TestCase):
+    def test_conversion_preserves_lexical_paths_and_spaces(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source with space.h'
+            source.write_text('header')
+            alias = root / 'alias.h'
+            alias.symlink_to(source.name)
+            self.assertEqual(MODULE._relative_depfile_inputs([str(source), str(alias)]),
+                             sorted([os.path.relpath(source), os.path.relpath(alias)]))
+
+    def test_different_drive_keeps_original_path(self):
+        with mock.patch.object(MODULE.os.path, 'relpath', side_effect=ValueError('different drive')):
+            self.assertEqual(MODULE._relative_depfile_inputs(['/external/input.h']),
+                             ['/external/input.h'])
+
+
+class NinjaDepfileTest(unittest.TestCase):
+    def setUp(self):
+        project = ROOT.parents[1]
+        self.gn = project / 'prebuilts/build-tools/linux-x86/bin/gn'
+        self.ninja = project / 'prebuilts/build-tools/linux-x86/bin/ninja'
+        if not self.gn.is_file() or not self.ninja.is_file():
+            self.skipTest('workspace GN and Ninja prebuilts are required')
+        self.temporary = tempfile.TemporaryDirectory(prefix='airscan-relative-depfile-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / 'workspace'
+        self.source = self.root / 'third_party/sane-airscan'
+        self.source.mkdir(parents=True)
+        tracked_source(self.source)
+        shutil.copy2(ROOT / 'patch_install.py', self.source / 'patch_install.py')
+        (self.root / 'build').symlink_to(project / 'build', target_is_directory=True)
+        self.env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+        self.ninja_prefix = []
+        (self.root / '.gn').write_text('buildconfig = "//BUILDCONFIG.gn"\n'
+                                      'script_executable = ' + json.dumps(sys.executable) + '\n')
+        (self.root / 'BUILDCONFIG.gn').write_text('set_default_toolchain("//:host")\n')
+        (self.root / 'BUILD.gn').write_text('''toolchain("host") {
+  tool("stamp") { command = "touch {{output}}" }
+  tool("action") { }
+}
+group("default") { deps = [ "//third_party/sane-airscan:airscan_action" ] }
+''')
+        gn_source = (ROOT / 'BUILD.gn').read_text()
+        start = gn_source.index('action("airscan_action") {')
+        end = gn_source.index('{', start)
+        depth = 1
+        while depth:
+            end += 1
+            depth += (gn_source[end] == '{') - (gn_source[end] == '}')
+        (self.source / 'BUILD.gn').write_text('source_dir = "//third_party/sane-airscan"\n'
+                                             + gn_source[start:end + 1] + '\n')
+        self.command([self.gn, 'gen', 'out/probe'])
+        description = json.loads(self.command([
+            self.gn, 'desc', 'out/probe', '//third_party/sane-airscan:airscan_action', '--format=json']))
+        args = next(iter(description.values()))['args']
+        self.stamp_name = args[args.index('--stamp') + 1]
+        self.depfile_name = args[args.index('--depfile') + 1]
+
+    def command(self, arguments, expected=0):
+        if arguments[0] == self.ninja:
+            arguments = self.ninja_prefix + arguments
+        result = subprocess.run([str(value) for value in arguments], cwd=self.root,
+                                env=self.env, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT)
+        self.assertEqual(result.returncode, expected, result.stdout)
+        return result.stdout
+
+    def build(self, expected=0):
+        return self.command([self.ninja, '-C', 'out/probe', 'airscan_action'], expected)
+
+    def stamp(self):
+        return self.root / 'out/probe' / self.stamp_name
+
+    def depfile(self):
+        return self.root / 'out/probe' / self.depfile_name
+
+    def assert_no_work(self):
+        self.assertIn('no work to do', self.build())
+
+    def edit_header(self):
+        header = self.source / 'airscan.h'
+        header.write_bytes(header.read_bytes() + b'\n/* Incremental input edit. */\n')
+        expected = header.read_bytes()
+        self.assertNotIn('no work to do', self.build())
+        self.assertEqual(header.read_bytes(), expected)
+        self.assert_no_work()
+
+    def test_clean_payload_relative_dependencies_and_noop(self):
+        golden = Path(self.temporary.name) / 'golden'
+        shutil.copytree(self.source, golden)
+        for name in SERIES:
+            apply_forward(golden, name)
+        expected = {name: record[0] for name, record in source_state(golden).items()}
+        self.build()
+        self.assertEqual(expected, {name: record[0] for name, record in source_state(self.source).items()})
+        target, dependencies = self.depfile().read_text().split(': ', 1)
+        self.assertEqual(target, self.stamp_name)
+        dependencies = shlex.split(dependencies)
+        self.assertTrue(dependencies)
+        self.assertTrue(all(not os.path.isabs(path) for path in dependencies))
+        self.assertIn(os.path.relpath(self.source / 'airscan.h', self.root / 'out/probe'), dependencies)
+        before = source_state(self.source)
+        self.assert_no_work()
+        self.assertEqual(before, source_state(self.source))
+
+    def test_real_header_edit_rebuilds_once(self):
+        self.build()
+        self.edit_header()
+
+    def test_patch_timestamp_change_keeps_payloads_and_converges(self):
+        self.build()
+        before = source_state(self.source)
+        patch = self.source / 'patches' / SERIES[0]
+        patch.write_bytes(patch.read_bytes())
+        self.assertNotIn('no work to do', self.build())
+        self.assertEqual(before, source_state(self.source))
+        self.assert_no_work()
+
+    def test_missing_output_is_repaired(self):
+        self.build()
+        before = source_state(self.source)
+        self.stamp().unlink()
+        self.assertNotIn('no work to do', self.build())
+        self.assertTrue(self.stamp().is_file())
+        self.assertEqual(before, source_state(self.source))
+        self.assert_no_work()
+
+    def test_failure_does_not_refresh_success_and_retry_recovers(self):
+        self.build()
+        before = source_state(self.source)
+        success = (self.stamp().stat().st_mtime_ns, self.depfile().read_bytes(),
+                   self.depfile().stat().st_mtime_ns)
+        patch = self.source / 'patches' / SERIES[-1]
+        valid = patch.read_bytes()
+        patch.write_text('not a patch\n')
+        self.build(expected=1)
+        self.build(expected=1)
+        self.assertEqual(before, source_state(self.source))
+        self.assertEqual(success, (self.stamp().stat().st_mtime_ns, self.depfile().read_bytes(),
+                                   self.depfile().stat().st_mtime_ns))
+        patch.write_bytes(valid)
+        self.build()
+        self.assert_no_work()
+
+    def relocate(self):
+        canonical = self.root
+        moved = self.root.with_name('renamed-workspace')
+        self.root.rename(moved)
+        self.root = moved
+        self.source = moved / 'third_party/sane-airscan'
+        return canonical
+
+    def test_relative_action_after_direct_directory_rename(self):
+        self.build()
+        self.relocate()
+        self.assert_no_work()
+        self.edit_header()
+
+    def test_private_mapping_after_directory_rename(self):
+        bwrap = shutil.which('bwrap')
+        if not bwrap:
+            self.skipTest('bubblewrap is required for canonical mapping')
+        self.build()
+        canonical = self.relocate()
+        path = ROOT.parents[1] / 'build/scripts/incremental_workspace.py'
+        spec = importlib.util.spec_from_file_location('airscan_incremental_workspace', path)
+        workspace = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(workspace)
+        self.ninja_prefix = [bwrap, '--die-with-parent', '--bind', '/', '/',
+                             *workspace.private_mountpoint(canonical),
+                             '--proc', '/proc', '--dev-bind', '/dev', '/dev',
+                             '--bind', str(self.root), str(canonical), '--chdir', str(canonical), '--']
+        self.assert_no_work()
+        self.edit_header()
+        self.assertFalse(canonical.exists())
 
 
 if __name__ == '__main__':

@@ -23,6 +23,16 @@ import tempfile
 from pathlib import Path
 
 
+def _relative_depfile_inputs(paths):
+    result = []
+    for path in paths:
+        try:
+            result.append(os.path.relpath(path))
+        except ValueError:
+            result.append(path)  # Different Windows drives cannot be rebased.
+    return sorted(result)
+
+
 def apply_patch(source_dir):
     patch_list = [
         'oh-transplant.patch',
@@ -92,7 +102,8 @@ def main():
     if args.depfile:
         sys.path.insert(0, str(Path(source_dir).parents[1] / 'build'))
         from scripts.util.build_utils import write_depfile
-        write_depfile(args.depfile, args.stamp, dependencies, add_pydeps=False)
+        write_depfile(args.depfile, args.stamp,
+                      _relative_depfile_inputs(dependencies), add_pydeps=False)
     if args.stamp:
         Path(args.stamp).parent.mkdir(parents=True, exist_ok=True)
         Path(args.stamp).touch()
