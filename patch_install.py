@@ -14,6 +14,9 @@
 # limitations under the License.
 
 import tarfile
+import fcntl
+import hashlib
+import json
 import argparse
 import os
 import subprocess
@@ -33,7 +36,96 @@ def _relative_depfile_inputs(paths):
     return sorted(result)
 
 
+def file_digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def replace_file(source, destination):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(dir=destination.parent, prefix='.airscan-file-')
+    os.close(descriptor)
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def recover_transaction(source, journal):
+    if not journal.exists():
+        return
+    entries = json.loads((journal / 'state.json').read_text())
+    for relative, state in entries.items():
+        target = source / relative
+        if Path(relative).is_absolute() or '..' in Path(relative).parts:
+            raise RuntimeError('Invalid airscan transaction path')
+        if target.is_symlink() or source.resolve() not in (target.resolve(), *target.resolve().parents):
+            raise RuntimeError('Airscan transaction target escapes source tree')
+        if file_digest(target) not in (state['old'], state['new']):
+            raise RuntimeError(f'Airscan recovery would overwrite an external edit: {target}')
+    for relative, state in entries.items():
+        target = source / relative
+        if state['old'] is None:
+            if target.exists():
+                target.unlink()
+        elif file_digest(target) != state['old']:
+            replace_file(journal / 'original' / relative, target)
+    shutil.rmtree(journal)
+
+
+def commit_patch_files(source, shadow, paths):
+    changed = [relative for relative in sorted(paths)
+               if file_digest(source / relative) != file_digest(shadow / relative)]
+    if not changed:
+        return
+    journal = source / '.airscan-patch-transaction'
+    with tempfile.TemporaryDirectory(dir=source, prefix='.airscan-prepare-') as temporary:
+        prepared = Path(temporary) / 'journal'
+        prepared.mkdir()
+        entries = {}
+        for relative in changed:
+            original, patched = source / relative, shadow / relative
+            if original.is_symlink() or source.resolve() not in (original.resolve(), *original.resolve().parents):
+                raise RuntimeError(f'Airscan patch target escapes source tree: {original}')
+            entries[relative] = {'old': file_digest(original), 'new': file_digest(patched)}
+            if original.is_file():
+                backup = prepared / 'original' / relative
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(original, backup)
+        (prepared / 'state.json').write_text(json.dumps(entries), encoding='utf-8')
+        os.replace(prepared, journal)
+        try:
+            for relative in changed:
+                patched, original = shadow / relative, source / relative
+                if patched.is_file():
+                    replace_file(patched, original)
+                elif original.exists():
+                    original.unlink()
+        except BaseException:
+            # If rollback also fails, keep the journal for the next invocation.
+            recover_transaction(source, journal)
+            raise
+        shutil.rmtree(journal)
+
+
 def apply_patch(source_dir):
+    source = Path(source_dir).absolute()
+    # Keep one lock inode per source tree. Do not unlink it after unlocking:
+    # waiters must not end up locking different inodes. An ordinary writable
+    # file also supports NFS exclusive flock, unlike a read-only directory FD.
+    descriptor = os.open(source / ".airscan-patch.lock",
+                         os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o666)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        recover_transaction(source, source / '.airscan-patch-transaction')
+        return _apply_patch_locked(str(source))
+    finally:
+        os.close(descriptor)
+
+
+def _apply_patch_locked(source_dir):
+
     patch_list = [
         'oh-transplant.patch',
         'oh-fix-subtraction-underflow.patch',
@@ -83,10 +175,7 @@ def apply_patch(source_dir):
                 result = execute_patch(shadow, name)
                 if result.returncode:
                     raise RuntimeError(f'{name} failed:\n{result.stdout}')
-            for relative in paths:
-                original, patched = Path(source_dir) / relative, shadow / relative
-                if patched.is_file() and (not original.exists() or original.read_bytes() != patched.read_bytes()):
-                    shutil.copyfile(patched, original)
+            commit_patch_files(Path(source_dir), shadow, paths)
             return sorted(str(Path(source_dir) / relative) for relative in paths)
     raise RuntimeError('Cannot determine sane-airscan patch state')
 
