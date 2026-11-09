@@ -14,7 +14,6 @@
 import("//build/ohos.gni")
 
 source_dir = "//third_party/sane-airscan"
-target_dir = "${target_gen_dir}/patches"
 
 action("airscan_action") {
   script = "//third_party/sane-airscan/patch_install.py"
@@ -28,27 +27,16 @@ action("airscan_action") {
     "${source_dir}/patches/oh-fix-empty-source-caps.patch",
     "${source_dir}/patches/oh-fix-eloop-uv-run-mutex-serialization.patch",
   ]
-  outputs = [
-    "${target_dir}/patches/airscan-conf.c",
-    "${target_dir}/patches/airscan-device.c",
-    "${target_dir}/patches/airscan-devops.c",
-    "${target_dir}/patches/airscan-eloop.c",
-    "${target_dir}/patches/airscan-http.c",
-    "${target_dir}/patches/airscan-init.c",
-    "${target_dir}/patches/airscan-log.c",
-    "${target_dir}/patches/airscan-mdns.c",
-    "${target_dir}/patches/airscan-netif.c",
-    "${target_dir}/patches/airscan-pollable.c",
-    "${target_dir}/patches/airscan-tiff.c",
-    "${target_dir}/patches/airscan-wsd.c",
-    "${target_dir}/patches/airscan-zeroconf.c",
-    "${target_dir}/patches/airscan.c",
-    "${target_dir}/patches/airscan.h",
-  ]
+  outputs = [ "${target_gen_dir}/patches.complete" ]
+  depfile = "${target_gen_dir}/patches.d"
   airscan_source_dir = rebase_path("${source_dir}", root_build_dir)
   args = [
     "--source-dir",
     "$airscan_source_dir",
+    "--stamp",
+    rebase_path(outputs[0], root_build_dir),
+    "--depfile",
+    rebase_path(depfile, root_build_dir),
   ]
 }
 
